@@ -71,17 +71,53 @@ export async function gatherSources(upTo, depth = 10, newFrom = null, loreLimit 
     return { card, persona, lore, story: parts.join('\n\n') };
 }
 
+// Модели с рассуждениями (GLM, DeepSeek R1 и подобные) могут потратить весь лимит ответа на «думалку» —
+// тогда ответ пустой. Поэтому: просим думать коротко, даём запас лимита даже коротким проверкам,
+// берём готовые блоки из рассуждений, а если и там ничего — один повтор с лимитом побольше.
+const BRIEF = 'Think briefly if at all — a few lines at most — then answer at once. Never deliberate at length over dates or calendar conversions: use what you know.';
+const BRIEF_HARD = 'Your previous attempt spent the whole limit on thinking and gave no answer. Do NOT think this time: write the requested lines immediately.';
+const MIN_TOKENS = 2000;      // лимит — потолок: обычной модели он ничего не стоит, а думающей оставляет место на ответ
+const RETRY_TOKENS = 8000;      // не выше 8192: часть API (DeepSeek и др.) отклоняет больший лимит
+
+/** Сообщения с припиской «думай коротко» в конце последнего сообщения */
+function withNote(messages, note) {
+    const out = messages.map(m => ({ ...m }));
+    const last = out[out.length - 1];
+    if (last && typeof last.content === 'string') last.content = `${last.content}\n\n${note}`;
+    return out;
+}
+/** Готовые скрытые блоки из рассуждений (модель написала ответ в «думалке» и не перенесла его) */
+function blocksFrom(reasoning) {
+    const all = String(reasoning || '').match(/<!--\s*HT[\s\S]*?-->/g) || [];
+    return all.join('\n');
+}
+
 /** Один запрос. Ошибка — с понятной причиной (для уведомления и логов) */
 // 4000: у моделей с рассуждениями 2000 не хватало — блоки в конце ответа (люди истории) обрезались
 export async function sendSide(profileId, messages, signal, maxTokens = 4000) {
     const svc = await service();
     if (!svc) throw new Error('Connection Manager недоступен (расширение выключено или таверна слишком старая)');
-    const res = await svc.sendRequest(profileId, messages, maxTokens, {
-        stream: false, signal, extractData: true, includePreset: false, includeInstruct: true,
-    });
-    const text = typeof res === 'string' ? res : (res?.content ?? '');
-    if (!String(text).trim()) throw new Error('пустой ответ модели');
-    return String(text);
+    const ask = async (msgs, n) => {
+        const res = await svc.sendRequest(profileId, msgs, n, {
+            stream: false, signal, extractData: true, includePreset: false, includeInstruct: true,
+        });
+        return { text: String(typeof res === 'string' ? res : (res?.content ?? '')), reasoning: typeof res === 'string' ? '' : String(res?.reasoning ?? '') };
+    };
+    const first = Math.max(maxTokens, MIN_TOKENS);
+    let r = await ask(withNote(messages, BRIEF), first);
+    if (r.text.trim()) return r.text;
+    const salvaged = blocksFrom(r.reasoning);
+    if (salvaged) {
+        console.info('[Hearthtide] помощник оставил ответ в рассуждениях — беру блоки оттуда');
+        return salvaged;
+    }
+    console.warn(`[Hearthtide] пустой ответ помощника${r.reasoning ? ` (рассуждения: ${r.reasoning.length} символов — лимит ушёл на «думалку»)` : ''} — повторяю с лимитом ${RETRY_TOKENS}`);
+    r = await ask(withNote(messages, `${BRIEF}\n${BRIEF_HARD}`), RETRY_TOKENS);
+    if (r.text.trim()) return r.text;
+    if (blocksFrom(r.reasoning)) return blocksFrom(r.reasoning);
+    throw new Error(r.reasoning
+        ? 'модель потратила весь лимит ответа на рассуждения. Выберите для помощника модель без рассуждений или поставьте ей низкий уровень рассуждений (reasoning effort)'
+        : 'пустой ответ модели');
 }
 
 /** Причина ошибки целиком: таверна заворачивает её в «API request failed» */

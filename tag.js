@@ -332,7 +332,8 @@ export function parseCast(text) {
 
 /**
  * Свидание: <!-- HT-DATE title=… | goal=… | hook=… | where=… | at=YYYY-MM-DD HH:MM | started=yes -->
- * at — на когда назначено (now — прямо сейчас); started=yes — история уже его начала (не предложение)
+ * at — на когда назначено (now — прямо сейчас); started=yes — история уже его начала (не предложение);
+ * agreed=yes — {{user}} уже согласился в своём сообщении (или сам позвал): без карточки «Принять / Отклонить»
  */
 export function parseDateBlock(text) {
     const inner = findBlock(text, 'HT-DATE');
@@ -347,7 +348,9 @@ export function parseDateBlock(text) {
     const k = String(f.kind || '').trim().toLowerCase();
     return { title, goal: clean(f.goal, 160), hook: clean(f.hook, 240), where: clean(f.where, 80), at: parseAt(f.at), steps,
         kind: /^(out|friend|друж|встреч|прогул)/.test(k) ? 'friendly' : /^(date|rom|свид)/.test(k) ? 'romantic' : null,
-        started: /^(yes|true|1|да)/i.test(String(f.started || '').trim()) };
+        started: /^(yes|true|1|да)/i.test(String(f.started || '').trim()),
+        // {{user}} уже согласился своими словами (или сам позвал) — карточка не нужна
+        agreed: /^(yes|true|1|да)/i.test(String(f.agreed || '').trim()) };
 }
 
 /** «1151-02-06 18:00», «06.02.1151 18:00», «18:00» (сегодня), «now» → { day, clock } | { now: true } | null */

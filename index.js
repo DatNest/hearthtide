@@ -676,12 +676,12 @@ function processReply(N) {
         dateIn = { ...plan, steps: [], started: false, ...(dateIn ? { title: dateIn.title || plan.title, hook: dateIn.hook || plan.hook, kind: plan.kind || dateIn.kind } : {}) };
     }
     // проверка сказала «только подумал» — приглашения нет, кубик остаётся (позовёт позже)
-    if (dateIn && !dateIn.started && conf?.date === false && !sideAsked.includes('datewatch')) {
+    if (dateIn && !dateIn.started && !dateIn.agreed && conf?.date === false) {
         console.info('[Hearthtide] свидание: проверка — персонаж только подумал о нём, приглашения нет');
         dateIn = null;
     }
     // ещё ждём проверку — карточку не показываем, но и кубик не перебрасываем
-    const dateWait = !conf && !!dateIn && !dateIn.started;
+    const dateWait = !conf && !!dateIn && !dateIn.started && !dateIn.agreed;
     const beat = sideText ? parseBeat(sideText) : null;
     // Строки H, пришедшие без запроса календаря, — тоже повод из истории: решает игрок
     // и личные, семейные, встречи из календаря — тоже: в календарь сами по себе идут только общие праздники
@@ -947,8 +947,10 @@ function processReply(N) {
         const dec = !dateIn.started && state.dateDecisions?.[String(d.title).toLowerCase()];
         if (dec === 'declined') d.status = 'declined';
         else if (dec === 'accepted') acceptInto(state, d);
-        // история договорилась на потом — сразу намечено
-        else if (!dateIn.started && (state.dateDecisions?.[String(d.title).toLowerCase()] === undefined) && sideAsked.includes('datewatch') && d.at && !d.at.now) d.status = 'scheduled';
+        // договорились на потом и {{user}} уже сам сказал «да» (или сам позвал) — сразу намечено;
+        // {{char}} только позвал, ответа ещё нет — карточка «Принять / Отклонить», как при броске
+        else if (!dateIn.started && dateIn.agreed && (state.dateDecisions?.[String(d.title).toLowerCase()] === undefined) && sideAsked.includes('datewatch') && d.at && !d.at.now) d.status = 'scheduled';
+        else if (!dateIn.started && dateIn.agreed && sideAsked.includes('datewatch') && d.at?.now) acceptInto(state, d);
         // при помощнике карточка и уведомление — только когда проверка ответила (или упала)
         else if (dateWait && d.status === 'offered') d.status = 'pending';
         if (d.status !== 'declined') state.date = d;
@@ -966,7 +968,7 @@ function processReply(N) {
     // что проверить коротким запросом после этого ответа: позвал ли {{char}} на свидание, позвал ли кто-то на праздник
     confirmNeed = apiOn() && !conf ? {
         N, hash: coreHash(text),
-        date: !!(dateIn && !dateIn.started) || (hadDateRoll && !!state.datePlan && state.date?.status !== 'active'),
+        date: !!(dateIn && !dateIn.started && !dateIn.agreed) || (hadDateRoll && !!state.datePlan && state.date?.status !== 'active'),
         inv: inviteWatch(text, hadInvRoll, small?.invite),
     } : null;
     if (confirmNeed && !confirmNeed.date && !confirmNeed.inv.length) confirmNeed = null;
@@ -1126,14 +1128,17 @@ function processReply(N) {
     }
 
     // ── Приглашения: бросок после ответа — кого из близких позовут (чем ближе день и человек, тем вероятнее) ──
-    rollInvite(text, hadInvRoll);
+    rollInvite(text, hadInvRoll, conf);
 
     // ── Свидание: бросок после ответа (есть романтика; после ссоры шанс выше) ──
     // Выпало, а модель промолчала — просим ещё раз, настойчивее (один раз); потом — новый бросок
     // свободно — всё, кроме идущего, предложенного и намеченного (раньше «не состоялось» навсегда блокировало броски)
     const free = !['active', 'offered', 'scheduled', 'pending'].includes(state.date?.status);
     const di = dateChanceInfo(state, state.turn, dateChanceSetting());
-    if (free && hadDateRoll && !dateIn && !(state.dateRollTry > 0) && di.chance > 0) {
+    if (free && hadDateRoll && !dateIn && !conf && state.datePlan && di.chance > 0) {
+        // проверка «позвали ли вслух» ещё не ответила — ответ обработается заново, когда она придёт
+        state.dateRoll = true;
+    } else if (free && hadDateRoll && !dateIn && !(state.dateRollTry > 0) && di.chance > 0) {
         state.dateRoll = true;
         state.dateRollTry = 1;
         console.info('[Hearthtide] свидание: выпало, но модель не позвала — прошу ещё раз');
@@ -1591,7 +1596,9 @@ function inviteWatch(text, rolled, marked = null) {
     return out.slice(0, 4);
 }
 /** Бросок после ответа: кого позовут в следующем ответе. Выпавшее, но не прозвучавшее — повтор, потом пауза */
-function rollInvite(text, had) {
+function rollInvite(text, had, conf = null) {
+    // проверка «позвали ли вслух» ещё не ответила — ответ обработается заново, когда она придёт; попытку не тратим
+    if (had && !conf && apiOn() && state.inv?.status !== 'offered' && state.inv?.key !== had.key && !state.bdDecisions?.[had.key]) { state.invRoll = had; return; }
     if (had && state.inv?.key !== had.key && !state.bdDecisions?.[had.key]) {
         if ((had.tries || 0) + 1 < INVITE_TRIES) {
             state.invRoll = { ...had, tries: (had.tries || 0) + 1 };
