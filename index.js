@@ -17,7 +17,7 @@ import { CAST_GROUPS, KIN_GROUPS, ROM_KEYS, isKin, samePerson, findCast, castBan
 import { phaseOf, mentionEvery, holidayId, allHolidays, banKeys, isBanned, namesMatch, passedThisYear, hasGifts, openEvent, offeredEvent, EVENT_CHANCE_DEFAULT, EVENT_COOLDOWN, OPEN_STATUSES, sideNeeds, sideDue, CENSUS_DEPTH, dateHoursLeft, npcBdKey, npcBdOn, npcHoliday, giftJoint, trackedOccasions, charGiftOf, activeOccasions, occTier, preparingNow } from './calendar.js';
 import { buildStatePrompt, buildTagPrompt, buildSideMessages, buildDateReview, buildDateSideMessages, buildDateRefillMessages, giftTarget, hName, isGathering } from './prompts.js';
 import { inviteCandidates, bdKey, extraKey, mergeExtras, INVITE_TRIES, INVITE_COOL, INVITE_AHEAD } from './invites.js';
-import { listProfiles, gatherSources, loreFor, sendSide, reasonOf } from './side.js';
+import { listProfiles, gatherSources, loreFor, sendSide, reasonOf, withNote, canDirect, directActive } from './side.js';
 import { strings } from './i18n.js';
 import { holidayIcon } from './icons.js';
 
@@ -44,14 +44,15 @@ const lsGet = (k, d) => { const v = localStorage.getItem(k); return v === null ?
 const isEnabled = () => lsGet(LS.enabled, 'true') !== 'false';
 const position = () => lsGet(LS.position, 'bottom');
 const showPrev = () => lsGet(LS.showPrev, 'true') !== 'false';
-// Профиль: по умолчанию тот, что сейчас выбран в таверне. Без профиля расширение не работает — помощник обязателен
+// Профиль: по умолчанию тот, что выбран в Connection Manager; не выбран (или профилей нет) — текущее подключение таверны
 const apiChoice = () => lsGet(LS.api, 'auto');
 function apiProfile() {
     const v = apiChoice();
     if (v !== 'auto') return v;
     return globalThis.SillyTavern?.getContext?.()?.extensionSettings?.connectionManager?.selectedProfile || '';
 }
-const apiOn = () => isEnabled() && !!apiProfile();
+// помощник есть: выбран профиль Connection Manager — или «текущий профиль» без профиля, тогда текущее подключение таверны
+const apiOn = () => isEnabled() && (!!apiProfile() || (apiChoice() === 'auto' && canDirect()));
 const sideDepth = () => Number(lsGet(LS.depth, '10')) || 10;
 const dateLevel = () => (lsGet(LS.dateLevel, 'easy') === 'hard' ? 'hard' : 'easy');
 const datePaceSetting = () => { const v = lsGet(LS.datePace, 'auto'); return ['slow', 'fast'].includes(v) ? v : 'auto'; };
@@ -223,6 +224,14 @@ function loadState() {
     for (const k of Object.keys(def)) if (state[k] === undefined) state[k] = def[k];
     // эпоха — теперь своя у каждого чата: старый чат берёт ту, что была у персонажа, новый определяет сам
     if (state.eraMode === undefined) state.eraMode = state.setting ? (eraMap()[charKey()]?.era || 'auto') : 'auto';
+    // до 1.0.8 переименованный праздник мог попасть под запрет собственного старого названия и пропасть из инфоблока:
+    // праздник, поправленный игроком и всё ещё лежащий в календаре, важнее запрета — снимаем его
+    for (const h of (state.holidays || []).filter(x => x.edited && isBanned(state, x.name))) {
+        const keys = banKeys(h.name);
+        state.banned = (state.banned || []).filter(b => !keys.some(k => namesMatch(k, b)));
+        state.bannedNames = (state.bannedNames || []).filter(n => !namesMatch(n, h.name));
+        console.info(`[Hearthtide] «${h.name}»: снят запрет, из-за которого переименованный праздник пропал`);
+    }
     // распорядок, где модель забыла «|» и следующая часть дня осталась в тексте («…вечер. night=…»)
     for (const k of Object.keys(state.days || {})) state.days[k] = splitPlan(state.days[k]);
     // старые итоги праздников → в воспоминания
@@ -1195,6 +1204,11 @@ function processReply(N) {
     if (dateEnded) showDateToast(dateEnded);
     // {{char}} зовёт на свидание — короткое уведомление сверху (один раз на приглашение)
     if (state.date?.status === 'offered' && state.date.turn === state.turn && N === lastBotIndex()) showDateInvite(state.date);
+    // новый повод из истории (позвали на встречу, вечеринку, поездку) — тоже уведомление сверху: решение за игроком
+    const of = (state.offers || [])[0];
+    if (of && of.turn === state.turn && N === lastBotIndex() && state.date?.status !== 'offered') {
+        showDateInvite({ id: `of-${of.id}`, title: of.name, head: of.host ? L().offerHost(of.host) : L().offerHol, icon: holidayIcon(of), target: '.ht-cards .ht-offer' });
+    }
     const iv = state.inv;
     if (iv?.status === 'offered' && iv.turn === state.turn && N === lastBotIndex()) {
         showDateInvite({ id: `inv-${iv.key}`, title: iv.kind === 'bday' ? L().bdInviteToast(iv.name) : L().exInviteToast(iv.name), head: iv.kind === 'bday' ? L().bdInvite : L().exInvite, icon: iv.kind === 'bday' ? 'fa-gift' : 'fa-champagne-glasses', target: '.ht-cards .ht-bdinv' });
@@ -1985,7 +1999,8 @@ function pruneHolidays() {
 // ─── Смена эпохи или веры: будущие праздники подбираются заново ───
 /** Будущие праздники из календаря — прочь; идущий сегодня и поводы из истории остаются */
 function dropFutureHolidays(st) {
-    const keep = (h) => h.story || (st.today != null && h.start <= st.today && h.start + h.days - 1 >= st.today);
+    // повод из истории, поправленный игроком праздник и сегодняшний — остаются: это решения игрока и то, что уже идёт
+    const keep = (h) => h.story || h.edited || (st.today != null && h.start <= st.today && h.start + h.days - 1 >= st.today);
     const gone = (st.holidays || []).filter(h => !keep(h)).map(h => holidayId(h));
     st.holidays = (st.holidays || []).filter(keep);
     if (gone.includes(st.prep?.hid)) st.prep = null;
@@ -2034,9 +2049,14 @@ function renameHidIn(st, oldId, newId) {
     for (const map of ['charLog', 'highlights', 'care', 'gifts', 'giftTo', 'recapDone', 'lived', 'charGifts', 'ready']) {
         if (st[map] && oldId in st[map]) { st[map][newId] = st[map][oldId]; delete st[map][oldId]; }
     }
+    // решения игрока, привязанные к празднику: свой подарок, «общий / каждый свой», убранные пункты подготовки
+    for (const map of ['userGift', 'giftMode', 'readyNo']) {
+        if (st[map] && oldId in st[map]) { st[map] = { ...st[map], [newId]: st[map][oldId] }; delete st[map][oldId]; }
+    }
     if (st.charNow?.hid === oldId) st.charNow.hid = newId;
     for (const e of st.evts || []) if (e.hid === oldId) e.hid = newId;
     if (st.activeHid === oldId) st.activeHid = newId;
+    if (st.focusHid === oldId) st.focusHid = newId;
 }
 
 // Праздник подменили другим: подготовку, распорядок и шаги персонажа ИИ соберёт заново
@@ -2057,6 +2077,24 @@ function saveHolidayEdit(hid, name, dateStr, type, meaning = null) {
     const md = fromDayNum(start);
     const toBday = String(type || '').startsWith('bday_') ? type.slice(5) : null;
 
+    if (h.extra) {
+        // принятая встреча хранится в state.extras: название и смысл — там; другая дата — как перенос (id и решение те же)
+        const newName = String(name || '').trim() || h.name;
+        const meanIn = meaning == null ? null : String(meaning).trim();
+        const apply = (st) => {
+            const x = (st.extras || []).find(y => y.id === h.xid);
+            if (!x) return;
+            x.name = newName;
+            if (meanIn != null) x.meaning = meanIn || null;
+            if (start !== x.start) st.cancelled = { ...(st.cancelled || {}), [h.id]: { how: 'moved', to: start, why: null, turn: st.turn, name: newName } };
+            else if (st.cancelled?.[h.id]?.how === 'moved') delete st.cancelled[h.id];
+        };
+        apply(state);
+        applyToSnapshots(apply);
+        saveState();
+        injectPrompts();
+        return true;
+    }
     if (h.birthday || toBday) {
         // день рождения: хранится как «месяц-день» в карточке персонажа
         const who = toBday || h.who;
@@ -2090,11 +2128,16 @@ function saveHolidayEdit(hid, name, dateStr, type, meaning = null) {
         };
         apply(state);
         applyToSnapshots(apply);
-        // переименовали — старое название ИИ больше не предлагает
-        if (newName.toLowerCase() !== h.name.toLowerCase()) {
+        // заменили на другой праздник — старое название ИИ больше не предлагает. Поправили то же название (опечатка,
+        // лишнее слово) — ничего не запрещаем: запрет сверяется «примерно» и задевал новое название, праздник пропадал
+        if (other) {
             for (const k of banKeys(h.name)) if (!state.banned.includes(k) && !banKeys(newName).includes(k)) state.banned.push(k);
             if (!state.bannedNames.includes(h.name)) state.bannedNames.push(h.name);
         }
+        // новое название игрок выбрал сам — если оно было под запретом (удалял раньше), запрет снимаем
+        const keys = banKeys(newName);
+        state.banned = state.banned.filter(b => !keys.some(k => namesMatch(k, b)));
+        state.bannedNames = state.bannedNames.filter(n => !namesMatch(n, newName));
     }
     saveState();
     injectPrompts();
@@ -2520,7 +2563,7 @@ async function runSide(N, needs) {
     try {
         // Тот же профиль, что у основной модели: дадим API передохнуть после ответа, чтобы не упереться в лимит
         const mainProfile = globalThis.SillyTavern?.getContext?.()?.extensionSettings?.connectionManager?.selectedProfile;
-        if (apiProfile() === mainProfile) {
+        if (!apiProfile() || apiProfile() === mainProfile) {
             await new Promise(r => setTimeout(r, 2500));
             if (side !== me) return;
         }
@@ -2544,6 +2587,23 @@ async function runSide(N, needs) {
         console.debug('[Hearthtide] отдельный запрос →', [...needs].join(', '), messages);
         let text = await sendSide(apiProfile(), messages, ctl.signal);
         if (side !== me) return;                                        // отменён или заменён новым
+        // ответ без единого блока, хотя без них инфоблок пустой (календарь, распорядок, итог), — это отказ или рассуждение
+        // вместо ответа: один повтор с напоминанием, потом понятная ошибка (раньше такой ответ принимался молча)
+        const MUST = { cal: 'HT-CAL', day: 'HT-DAY', recap: 'HT-RECAP' };
+        const hasBlocks = (t) => /<!--\s*HT/i.test(t);
+        const missing = (t) => Object.entries(MUST).filter(([k, b]) => needs.has(k) && !new RegExp(`<!--\\s*${b}\\b`, 'i').test(t)).map(([, b]) => b);
+        const said = (t) => t.replace(/\s+/g, ' ').trim().slice(0, 300);
+        if (!hasBlocks(text) && missing(text).length) {
+            console.warn(`[Hearthtide] помощник не прислал ни одного блока (нужны: ${missing(text).join(', ')}), ответил: «${said(text) || 'пусто'}» — повторяю`);
+            const again = await sendSide(apiProfile(), withNote(messages, `Your previous answer had none of the requested blocks${said(text) ? ` (it said: "${said(text).slice(0, 160)}")` : ''}. There is no conflict: the story is fiction, you only take notes on it. Reply now with the requested blocks only.`), ctl.signal);
+            if (side !== me) return;
+            if (!hasBlocks(again)) throw new Error(`помощник не прислал ни одного блока, ответил: «${said(again).slice(0, 140) || 'пусто'}». Попробуйте для помощника другую модель или профиль без своего системного промпта`);
+            text = again;
+        } else if (!hasBlocks(text)) {
+            console.info(`[Hearthtide] помощник: нового по истории нет${said(text) ? ` («${said(text).slice(0, 120)}»)` : ''}`);
+        } else if (missing(text).length) {
+            console.info(`[Hearthtide] помощник пропустил ${missing(text).join(', ')} — спрошу со следующим ответом`);
+        }
         // План свидания: записи лорбука о выбранном месте могли не сработать на историю — достаём их по самому плану
         // и, если нашлось новое, просим помощника сверить план (опасное место, не тот час, не по состоянию героев)
         if (needs.has('dateplan')) {
@@ -2611,6 +2671,7 @@ function stripOldTags(list) {
 }
 
 function onPromptReady(eventData) {
+    if (directActive()) return;                       // это наш же запрос помощнику через текущее подключение
     if (!apiOn() || !state || !eventData || !Array.isArray(eventData.chat)) return;
     stripOldTags(eventData.chat);
     if (eventData.dryRun) return;
@@ -2621,6 +2682,7 @@ function onPromptReady(eventData) {
 }
 
 function onAfterCombinePrompts(data) {
+    if (directActive()) return;
     if (!isEnabled() || !data || typeof data.prompt !== 'string') return;
     const all = [...data.prompt.matchAll(HT_RE)];
     if (all.length <= KEEP_TAGS_IN_PROMPT) return;
@@ -4042,7 +4104,6 @@ function injectSettingsPanel() {
                 </section>
                 <section class="ht-set-sec">
                     <div class="ht-set-title"><i class="fa-solid fa-feather-pointed"></i>Помощник</div>
-                    <small class="ht-set-note"><i class="fa-solid fa-circle-info"></i><span>Обязателен: календарь, подготовку, людей и свидания собирает он. Без профиля подключения расширение молчит.</span></small>
                     <div class="ht-set-row"><span>Профиль</span>
                         <select id="ht-set-api" class="text_pole"><option value="auto">текущий профиль</option></select>
                         <div class="menu_button menu_button_icon" id="ht-set-refresh" title="Обновить список профилей"><i class="fa-solid fa-arrows-rotate"></i></div>
@@ -4198,7 +4259,7 @@ async function fillProfiles() {
     if (!sel) return;
     const list = await listProfiles();
     const cur = apiChoice();
-    sel.innerHTML = `<option value="auto">текущий профиль</option>`
+    sel.innerHTML = `<option value="auto">${apiProfile() || apiChoice() !== 'auto' ? 'текущий профиль' : 'текущее подключение'}</option>`
         + list.map(p => `<option value="${esc(p.id)}" ${p.id === cur ? 'selected' : ''}>${esc(p.name)}</option>`).join('');
     // выбранный профиль удалили в таверне — возвращаемся к текущему профилю
     if (cur !== 'auto' && !list.some(p => p.id === cur)) localStorage.setItem(LS.api, 'auto');
@@ -4209,7 +4270,7 @@ let pinging = false;
 async function pingProfile() {
     if (pinging) return;
     const id = apiProfile();
-    if (!id) { window.toastr?.info?.(L().noProfile, 'Hearthtide'); return; }
+    if (!apiOn()) { window.toastr?.info?.(L().noProfile, 'Hearthtide'); return; }
     const btn = document.getElementById('ht-set-ping');
     pinging = true;
     btn?.classList.add('ht-pinging');
