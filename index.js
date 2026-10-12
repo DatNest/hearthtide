@@ -792,7 +792,15 @@ function processReply(N) {
         else if (target) slip = true;
     }
     // ── Поводы из истории — ждут решения игрока ──
+    offersAgreed = [];
     if (takeOffers(offersIn)) slip = true;
+    // согласились в самой истории — без карточки, но игрок должен заметить (один раз)
+    for (const h of offersAgreed) {
+        const k = holidayId(h);
+        if (N !== lastBotIndex() || offerAgreedToasted.has(k)) continue;
+        offerAgreedToasted.add(k);
+        window.toastr?.info?.(`${L().exPlanned}: ${h.name}`, 'Hearthtide');
+    }
     // ── Дополнительные праздники: на них позовут (бросок), в календаре — только принятые ──
     for (const x of extrasIn) x.name = occasionName(x.name, x.meaning, x.host);
     if (extrasIn.length && mergeExtras(state, extrasIn, langOk, namesMatch)) slip = true;
@@ -1585,6 +1593,14 @@ function handleInvite(small, conf, N, text = '') {
     const inv = { kind: c.kind, key: c.key, cid: c.cid || null, xid: c.xid || null, name: c.name, host: c.host, whom: c.whom || 'both', day: c.day, status: 'offered', turn: state.turn, msg: N };
     const dec = state.bdDecisions?.[c.key];
     if (dec) inv.status = dec;                                // игрок уже решал (свайп, пересборка) — его решение в силе
+    else if (byCheck && conf.agreed) {
+        // {{user}} сам напросился или уже сказал «да» в своей реплике — карточка не нужна, как у свидания
+        inv.status = 'accepted';
+        state.bdDecisions = { ...(state.bdDecisions || {}), [c.key]: 'accepted' };
+        noteDecision('bd', c.key, N);
+        if (N === lastBotIndex() && !offerAgreedToasted.has(c.key)) { offerAgreedToasted.add(c.key); window.toastr?.info?.(`${c.kind === 'bday' ? L().bdPlanned : L().exPlanned}: ${c.name}`, 'Hearthtide'); }
+        console.info(`[Hearthtide] приглашение «${c.name}»: ${getUserName()} уже согласился в истории — принято без карточки`);
+    }
     state.inv = inv;
     if (state.invRoll?.key === c.key) state.invRoll = null;
     console.info(`[Hearthtide] приглашение: ${c.kind === 'bday' ? 'день рождения' : 'праздник'} «${c.name}» на ${isoOf(c.day)}${dec ? ` (решение уже было: ${dec})` : ''}`);
@@ -1827,6 +1843,17 @@ function takeOffers(list) {
         }
         if (offerKnown(o)) { console.info(`[Hearthtide] повод «${o.name}» пропущен: уже в календаре, прошёл или отклонён в этом году`); continue; }
         if (state.offers.some(x => namesMatch(x.name, o.name) && Math.abs(x.start - o.start) <= 14)) continue;
+        // {{user}} уже согласился в ролплее (или сам предложил, или они уже там) — карточка не нужна, повод сразу в календаре,
+        // как у свидания; кто ещё не ответил — карточка «Принять / Отклонить». Дни рождения — всегда карточкой
+        if (o.agreed && !o.bday && !o.npcCid) {
+            const h = { start: o.start, days: o.days, name: o.name, type: o.type, prep: o.prep, meaning: o.meaning || null, edited: true, story: true, cause: o.cause || null, host: o.host || null };
+            if (!(state.holidays || []).some(x => holidayId(x) === holidayId(h))) {
+                state.holidays = [...(state.holidays || []), h].sort((a, b) => a.start - b.start);
+                offersAgreed.push(h);
+                console.info(`[Hearthtide] повод «${o.name}»: ${getUserName()} уже согласился в истории — сразу в календаре, без карточки`);
+            }
+            continue;
+        }
         state.offers.push({ ...o, id: `of-${state.turn}-${Date.now().toString(36)}-${state.offers.length}`, turn: state.turn });
     }
     // устаревшие: дата прошла, игрок давно не решает — так и не решённое тоже помним (снова не предложим)
@@ -2006,7 +2033,10 @@ function dropFutureHolidays(st) {
     if (gone.includes(st.prep?.hid)) st.prep = null;
 }
 let rebuiltNames = null;
-const storyDateToasted = new Set();     // свидания, договорённые в самой истории, о которых уже сказали     // праздники, подобранные заново, — показать уведомлением, когда придут
+const storyDateToasted = new Set();
+// поводы, на которые {{user}} уже согласился в истории (в этом ответе), — для уведомления «Намечено: …»
+let offersAgreed = [];
+const offerAgreedToasted = new Set();     // свидания, договорённые в самой истории, о которых уже сказали     // праздники, подобранные заново, — показать уведомлением, когда придут
 
 function rebuildCalendar() {
     if (!state) loadState();
@@ -2422,24 +2452,42 @@ function buildConfirmMessages(ctx, need, msgs) {
     const prev = msgs.slice(0, -1).reverse().find(m => m?.is_user && m.mes);
     const q = [];
     if (need.date) q.push(`DATE: yes or no — in the LAST MESSAGE, does ${charName} actually ask ${userName} on a date or out somewhere together — said out loud to ${userName} (or written to her/him)? Only thinking about it, planning it in their head, or a vague hint — no.`);
+    if (need.inv.length) q.push(`AGREED: yes or no — if someone invites ${userName} in the LAST MESSAGE: had ${userName}'s own message before it already asked to come or said yes to it? No if ${userName} hasn't answered yet.`);
     if (need.inv.length) q.push(`INVITE: one of the names below, or no — in the LAST MESSAGE, does someone actually invite ${userName} (alone or with ${charName}) to one of these — in person, by word, by a note or through someone: ${need.inv.map(x => `"${x.value}" — ${x.label}`).join('; ')}? Only mentioning it, planning or thinking of inviting — no. If yes, answer with its name exactly as quoted.`);
     return [
-        { role: 'system', content: 'You check one roleplay message for an extension. Answer only with the lines asked, one per line, nothing else.' },
+        { role: 'system', content: 'You check one roleplay message for an extension. Answer in English with exactly the lines asked, each starting with its label (DATE:, INVITE:), one per line — no explanations, no other text.' },
         { role: 'user', content: `${prev ? `[${userName}, before it]\n${clean(prev.mes).slice(-800)}\n\n` : ''}[LAST MESSAGE]\n${clean(last?.mes).slice(-3500)}\n\n${q.join('\n')}` },
     ];
 }
 function parseConfirm(text, need) {
     const t = String(text || '');
+    const low = (v) => String(v || '').toLowerCase().replace(/ё/g, 'е');
+    // модель часто отвечает рассуждением, а сам ответ — последней строкой без «DATE:» / «INVITE:» («…прямое приглашение. \n Новогодний корпоратив»)
+    const lines = t.split(/\n+/).map(x => x.replace(/^[\s"'«»“”*`-]+|[\s"'«»“”*`.!]+$/g, '').trim()).filter(Boolean);
+    const last = lines[lines.length - 1] || '';
+    const NEG = /(^|\s)(no|none|not|нет|не\s+(является|приглаш|зов|звал|просит|предлага))(\s|$|[.,])/i;
     const dm = t.match(/DATE\s*[:=|-]\s*(yes|no|да|нет)/i);
-    const date = need.date ? (dm ? /^(yes|да)/i.test(dm[1]) : null) : null;
-    let inv = null;
-    const bm = t.match(/(?:INVITE|BDAY)\s*[:=|-]\s*([^\n]+)/i);
-    if (need.inv.length && bm && !/^\s*(no|нет|none|—|-)\b/i.test(bm[1])) {
-        const said = bm[1].toLowerCase().replace(/ё/g, 'е');
-        const vals = need.inv.map(x => x.value);
-        inv = vals.find(n => said.includes(String(n).toLowerCase().replace(/ё/g, 'е').slice(0, Math.max(3, String(n).length - 2)))) || (vals.length === 1 && /^(yes|да)/i.test(bm[1].trim()) ? vals[0] : null);
+    let date = null;
+    if (need.date) {
+        if (dm) date = /^(yes|да)/i.test(dm[1]);
+        else if (!need.inv.length && /^(yes|да)$/i.test(last)) date = true;
+        else if (!need.inv.length && /^(no|нет)$/i.test(last)) date = false;
     }
-    return { date, inv };
+    let inv = null;
+    const vals = need.inv.map(x => x.value);
+    const pick = (said) => vals.find(n => low(said).includes(low(n).slice(0, Math.max(3, String(n).length - 2)))) || null;
+    const bm = t.match(/(?:INVITE|BDAY)\s*[:=|-]\s*([^\n]+)/i);
+    if (need.inv.length && bm) {
+        if (!/^\s*["'«]?\s*(no|нет|none|—|-)\b/i.test(bm[1])) inv = pick(bm[1]) || (vals.length === 1 && /^(yes|да)/i.test(bm[1].trim()) ? vals[0] : null);
+    } else if (need.inv.length && last && !NEG.test(last)) {
+        // без «INVITE:» — последняя строка, если это одно из названий (и ответ не «нет»)
+        const hit = pick(last);
+        if (hit && last.split(/\s+/).length <= String(hit).split(/\s+/).length + 3) inv = hit;
+        if (inv) console.info(`[Hearthtide] проверка ответила без «INVITE:» — взяла последнюю строку: «${last}»`);
+    }
+    // {{user}} сам напросился или уже сказал «да» — приглашение принято без карточки
+    const agreed = !!inv && /AGREED\s*[:=|-]\s*["'«]?\s*(yes|да)\b/i.test(t);
+    return { date, inv, agreed };
 }
 
 // ─── Свидание: отдельный короткий запрос помощника после каждого ответа ───
