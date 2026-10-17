@@ -91,6 +91,8 @@ const isChatCompletion = () => stModule?.main_api === 'openai';
 function esc(s) {
     return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
+/** Число из состояния чата: в HTML попадает только настоящее число (файл чата могли подправить руками) */
+const num = (v, d = 0) => (v !== null && v !== '' && Number.isFinite(+v) ? +v : d);
 const clone = (o) => JSON.parse(JSON.stringify(o));
 
 // ═══════════════════════════════════════════════════════════════
@@ -2905,11 +2907,11 @@ function ring(view) {
     let frac = 0, center = '', cls = '';
     if (view.kind === 'today') {
         frac = view.h?.days > 1 ? view.dayIndex / view.h.days : 1;
-        center = view.h?.days > 1 ? `<span class="ht-ring-num">${view.dayIndex}/${view.h.days}</span>` : `<i class="fa-solid ${holidayIcon(view.h)}"></i>`;
+        center = view.h?.days > 1 ? `<span class="ht-ring-num">${num(view.dayIndex)}/${num(view.h.days)}</span>` : `<i class="fa-solid ${holidayIcon(view.h)}"></i>`;
         cls = 'ht-ring-today';
     } else if ((view.kind === 'prep' || view.kind === 'far' || view.kind === 'after') && view.daysTo != null) {
         frac = Math.max(0.03, 1 - Math.min(view.daysTo, 30) / 30);
-        center = `<span class="ht-ring-num">${view.daysTo > 99 ? '99+' : view.daysTo}</span>`;
+        center = `<span class="ht-ring-num">${view.daysTo > 99 ? '99+' : num(view.daysTo)}</span>`;
         cls = view.kind === 'prep' ? 'ht-ring-prep' : '';
     } else {
         center = '<i class="fa-regular fa-calendar"></i>';
@@ -3072,7 +3074,7 @@ function dateCardHtml() {
     const lvl = dateLevel();
     const g = d.goalDone ? 'done' : goalOpen(d, lvl) ? 'open' : 'locked';
     const open = openSteps(d);
-    const step = (x, cls = '') => `<button class="ht-date-step ht-who-${x.who} ${cls}" data-act="date-step" data-n="${x.n}"${x.state !== 'open' ? ' disabled tabindex="-1"' : ''}>
+    const step = (x, cls = '') => `<button class="ht-date-step ht-who-${esc(x.who)} ${cls}" data-act="date-step" data-n="${num(x.n)}"${x.state !== 'open' ? ' disabled tabindex="-1"' : ''}>
         <i class="fa-${fr ? (x.state === 'done' ? 'solid fa-circle-check' : x.state === 'failed' ? 'solid fa-circle-xmark' : 'regular fa-circle')
             : x.state === 'done' ? 'solid fa-heart' : x.state === 'failed' ? 'solid fa-heart-crack' : 'regular fa-heart'}"></i><span>${esc(x.t)}${x.thought && x.state === 'open' ? `<small class="ht-step-thought">${esc(x.thought)}</small>` : ''}</span></button>`;
     const slots = [];
@@ -3098,7 +3100,7 @@ function dateCardHtml() {
             <p class="ht-dgoal-how"><i class="fa-solid ${g === 'done' ? 'fa-circle-check' : g === 'open' ? 'fa-lock-open' : 'fa-lock'}"></i><span>${esc(goalHow)}</span></p>
         </div>` : '';
     // ход свидания в инфоблоке не показываем — его помнит модель (журнал идёт в промпт, пока свидание идёт)
-    return `<div class="ht-offer ht-date ht-date-on${fc}${fresh ? ' ht-offer-new' : ''}${dateLoading() ? ' ht-date-busy' : ''}" style="--v:${d.score};--c:${tone}">
+    return `<div class="ht-offer ht-date ht-date-on${fc}${fresh ? ' ht-offer-new' : ''}${dateLoading() ? ' ht-date-busy' : ''}" style="--v:${num(d.score)};--c:${tone}">
         <span class="ht-dhearts" aria-hidden="true">${'<i class="fa-solid fa-heart"></i>'.repeat(hearts)}</span>
         <div class="ht-dhead">${portrait}
             <span class="ht-dstrip" title="${esc(d.vibe || L().dateVibeStart)}"><i></i></span>
@@ -3109,9 +3111,9 @@ function dateCardHtml() {
                 <span class="ht-dvibe">${esc(d.vibe || L().dateVibeStart)}</span>
                 ${d.closing != null ? `<span class="ht-dclosing"><i class="fa-solid fa-hourglass-end"></i>${esc(L().dateClosing)}</span>` : ''}
             </div>
-            <div class="ht-dscore"><b>${d.score}%</b><small>${L().dateSuccess}</small></div>
+            <div class="ht-dscore"><b>${num(d.score)}%</b><small>${L().dateSuccess}</small></div>
         </div>
-        <div class="ht-date-meter" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${d.score}" aria-label="${esc(L().dateSuccess)}"><i></i></div>
+        <div class="ht-date-meter" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${num(d.score)}" aria-label="${esc(L().dateSuccess)}"><i></i></div>
         ${goalBox}
         ${(d.gifts || []).length ? `<p class="ht-dgifts"><i class="fa-solid fa-gift"></i><span>${d.gifts.map(g => esc(g.from ? `${g.from}: ${g.what}` : g.what)).join(' · ')}</span></p>` : ''}
         ${d.thought ? `<p class="ht-dthought"><i class="fa-solid fa-comment-dots"></i><span><b>${L().dateThinks}</b>«${esc(d.thought.replace(/^[«"“]+|[»"”]+$/g, ''))}»</span></p>` : ''}
@@ -3174,7 +3176,7 @@ function showDateToast(d) {
         <div class="ht-date-hearts"><i class="fa-solid ${fr ? 'fa-star' : ic}"></i><i class="fa-solid ${ic}"></i><i class="fa-solid ${fr ? 'fa-star' : ic}"></i></div>
         <span>${esc(fr ? L().outingOver : L().dateOver)}</span>
         <b>${esc(L().dateResult[d.result])}</b>
-        <p>${esc(d.title)} · ${d.score}%</p>
+        <p>${esc(d.title)} · ${num(d.score)}%</p>
     </div>`;
     const close = () => { el.classList.add('ht-out'); setTimeout(() => el.remove(), 300); };
     el.addEventListener('click', close);
@@ -3223,7 +3225,7 @@ const barHtml = (n) => {
     const v = Math.max(-100, Math.min(100, n ?? 0));
     return `<span class="ht-mini-bar${v < 0 ? ' ht-neg' : ''}" role="meter" aria-valuemin="-100" aria-valuemax="100" aria-valuenow="${v}"><i style="--v:${Math.abs(v)};--h:${Math.round((v + 100) * 0.6)}"></i></span>`;
 };
-const signed = (n) => (n > 0 ? `+${n}` : `${n}`);
+const signed = (n) => { const v = num(n); return v > 0 ? `+${v}` : `${v}`; };
 function miniBar(src, who, n, note) {
     const words = note || L().rel[relLevel(n ?? 0)];
     return `<div class="ht-mini" title="${esc(`${who}: ${signed(n ?? 0)} · ${words}`)}">
@@ -3402,7 +3404,7 @@ function openCastEditorRaw(cid) {
             saveChatDebounced();
             const img = document.createElement('span');
             img.className = 'ht-ava';
-            img.innerHTML = `<img src="${avatars()[cid]}" alt="">`;
+            img.innerHTML = `<img src="${esc(avatars()[cid])}" alt="">`;
             wrap.querySelector('.ht-cast-photo .ht-ava')?.replaceWith(img);
             renderAll();
         } catch (err) {
@@ -3450,8 +3452,8 @@ function castFormHtml(p, photo) {
         <label class="ht-notkin"${kinU || kinC ? ' hidden' : ''}>${L().fGroup}<select class="text_pole" data-ed="group">${groups}</select></label>
         <label>${L().fBday}<input class="text_pole" data-ed="bday" value="${esc(bdayText(p.bday))}" inputmode="numeric" placeholder="${esc(L().unknown)}"></label>
         <div class="ht-edit-two">
-            <label>${esc(getUserName())} −100…100<input class="text_pole" data-ed="relU" type="number" min="-100" max="100" value="${p.rel?.user ?? 0}"></label>
-            <label>${esc(getCharName())} −100…100<input class="text_pole" data-ed="relC" type="number" min="-100" max="100" value="${p.rel?.char ?? 0}"></label>
+            <label>${esc(getUserName())} −100…100<input class="text_pole" data-ed="relU" type="number" min="-100" max="100" value="${num(p.rel?.user)}"></label>
+            <label>${esc(getCharName())} −100…100<input class="text_pole" data-ed="relC" type="number" min="-100" max="100" value="${num(p.rel?.char)}"></label>
         </div>
         <div class="ht-edit-two">
             <label>${esc(L().howWith(getUserName()))}<input class="text_pole" data-ed="noteU" value="${esc(p.note?.user || '')}"></label>
@@ -3656,13 +3658,13 @@ function eventsHtml(evts) {
         const open = ['active', 'invited', 'joined'].includes(e.status);
         if (e.kind === 'party') {
             const moments = (e.moments || []).map(m => `<li>${esc(m.title)}</li>`).join('');
-            return `<details class="ht-party ht-ev-${e.status}"${open ? ' open' : ''}>
+            return `<details class="ht-party ht-ev-${esc(e.status)}"${open ? ' open' : ''}>
                 <summary><i class="fa-solid fa-champagne-glasses"></i><span><b>${esc(e.title)}</b>${e.who ? ` · ${esc(e.who)}` : ''}</span><em>${esc(st)}</em></summary>
                 ${moments ? `<div class="ht-moments"><span>${L().moments}</span><ul>${moments}</ul></div>` : ''}
                 ${e.note ? `<p class="ht-ev-note">${esc(e.note)}</p>` : ''}
             </details>`;
         }
-        return `<div class="ht-ev ht-ev-${e.status}"><i class="fa-solid ${open ? 'fa-bolt' : e.status === 'done' ? 'fa-circle-check' : 'fa-circle-minus'}"></i>
+        return `<div class="ht-ev ht-ev-${esc(e.status)}"><i class="fa-solid ${open ? 'fa-bolt' : e.status === 'done' ? 'fa-circle-check' : 'fa-circle-minus'}"></i>
             <div><span><b>${esc(e.title)}</b>${e.who ? ` · ${esc(e.who)}` : ''} <em>${esc(st)}</em></span>${e.note ? `<p class="ht-ev-note">${esc(e.note)}</p>` : ''}</div></div>`;
     }).join('');
     return rows ? `<div class="ht-evbox"><div class="ht-evbox-head"><i class="fa-solid fa-dice"></i>${esc(L().events)}</div>${rows}</div>` : '';
@@ -3858,7 +3860,7 @@ function bodyHtml(view, live, tab = 'now') {
             <div><span>${esc(L().giftFrom(getUserName()))}</span><b>${esc(ug.text)}</b>${ug.done ? '' : giftStage(ug)}</div></div>` : '';
         // прошлые шаги в инфоблок не выводим — они нужны только модели, чтобы цепочка шла дальше
         charCard = `<div class="ht-char${live && view.care === 'high' ? ' ht-glow' : ''}">
-            <div class="ht-char-head"><i class="fa-solid fa-user"></i><b>${esc(getCharName())}</b><span class="ht-care ht-care-${view.care}">${esc(L().care[view.care])}</span></div>
+            <div class="ht-char-head"><i class="fa-solid fa-user"></i><b>${esc(getCharName())}</b><span class="ht-care ht-care-${esc(view.care)}">${esc(L().care[view.care])}</span></div>
             ${view.care !== 'low' ? `<div class="ht-char-now"><span>${L().thinks}</span>${view.charNow ? `«${esc(view.charNow.replace(/^[«"“]+|[»"”]+$/g, ''))}»` : esc(L().charIdle)}</div>` : ''}
             ${gift}${ugift}
         </div>`;
@@ -3891,9 +3893,9 @@ function bodyHtml(view, live, tab = 'now') {
     const yearRows = (view.year || []).map(i => {
         const [, m, d] = i.iso.split('-');
         const res = i.type === 'date' && i.result ? i.result : null;
-        if (i.result === 'cancelled') return `<div class="ht-yr ht-yr-missed ht-yr-off"><time>${d}.${m}</time><i class="fa-solid fa-ban"></i><div><b>${esc(i.name)}</b></div><em>${esc(L().yearCancelled)}</em></div>`;
-        return `<div class="ht-yr${i.kept ? '' : ' ht-yr-missed'}${res ? ` ht-res-${res}` : ''}${i.friendly ? ' ht-friendly' : ''}">
-            <time>${d}.${m}</time><i class="fa-solid ${i.friendly ? 'fa-handshake' : holidayIcon(i)}"></i>
+        if (i.result === 'cancelled') return `<div class="ht-yr ht-yr-missed ht-yr-off"><time>${esc(d)}.${esc(m)}</time><i class="fa-solid fa-ban"></i><div><b>${esc(i.name)}</b></div><em>${esc(L().yearCancelled)}</em></div>`;
+        return `<div class="ht-yr${i.kept ? '' : ' ht-yr-missed'}${res ? ` ht-res-${esc(res)}` : ''}${i.friendly ? ' ht-friendly' : ''}">
+            <time>${esc(d)}.${esc(m)}</time><i class="fa-solid ${i.friendly ? 'fa-handshake' : holidayIcon(i)}"></i>
             <div><b>${esc(i.name)}</b>${recapSpoiler(i.recap, i.parts, i.type === 'date' && (i.friendly ? 'friendly' : true))}</div>
             <em>${res ? (res === 'missed' ? L().yearMissed : L().dateResult[res]) : i.kept ? L().yearKept : L().yearMissed}</em></div>`;
     }).join('');
@@ -3903,7 +3905,7 @@ function bodyHtml(view, live, tab = 'now') {
         const queued = view.recall === f.id;
         const btn = live ? `<button class="ht-recall${queued ? ' ht-on' : ''}" data-act="recall" data-fb="${esc(f.id)}" title="${queued ? L().recallQueued : L().recall}">
             <i class="fa-solid fa-clock-rotate-left"></i><span>${queued ? L().recallShort : L().recall}</span></button>` : '';
-        const res = f.kind === 'date' && f.result ? `<em class="ht-res-chip ht-res-${f.result}${f.friendly ? ' ht-friendly' : ''}"><i class="fa-solid ${f.friendly ? 'fa-handshake' : 'fa-heart'}"></i>${esc(f.result === 'missed' ? L().yearMissed : L().dateResult[f.result] || '')}</em>` : '';
+        const res = f.kind === 'date' && f.result ? `<em class="ht-res-chip ht-res-${esc(f.result)}${f.friendly ? ' ht-friendly' : ''}"><i class="fa-solid ${f.friendly ? 'fa-handshake' : 'fa-heart'}"></i>${esc(f.result === 'missed' ? L().yearMissed : L().dateResult[f.result] || '')}</em>` : '';
         return `<div class="ht-fb${f.kind === 'date' ? ' ht-fb-date' : ''}"><div><b>${esc(f.title)}</b>${res}${f.when ? `<span class="ht-mute"> · ${esc(f.when)}</span>` : ''}${recapSpoiler(f.text, f.parts, f.kind === 'date' && (f.friendly ? 'friendly' : true))}</div>${btn}</div>`;
     }).join('');
 
