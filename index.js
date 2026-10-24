@@ -14,7 +14,7 @@ import { dayPart, plural, parseDate, fromDayNum, isoOf, dayNum } from './dates.j
 import { slimSmallTag, parseReady, parseExtras, parseSmall, parseCalendar, parsePrep, parseDay, parseRecap, parsePeople, parseEvents, parseOffers, parseBeat, parseCast, parseDateBlock, parseDateUp, parseRecapParts, stripBlocks } from './tag.js';
 import { PAIR_DEFAULT, bondCap, dateKindFor, isFriendlyDate, newDate, startDate, applyDateUp, openSteps, goalOpen, doneCount, toggleStep, finishDate, dateChanceInfo, migrateDate, DATE_MISS_HOURS, DATE_OPEN, DATE_SKIP_END, DATE_SKIP_HARD, DATE_CLOSE_TURNS, DATE_QUIET, goalNeed, paceAuto, stepKinds, MISS_PAIR } from './romance.js';
 import { CAST_GROUPS, KIN_GROUPS, ROM_KEYS, isKin, samePerson, findCast, castBanned, parseBday, bdayText, bdayIn, ageOf, relLevel, romLevel, clampRel, mergeCast, migrateCast, nameCandidates } from './cast.js';
-import { phaseOf, mentionEvery, holidayId, allHolidays, banKeys, isBanned, namesMatch, passedThisYear, hasGifts, openEvent, offeredEvent, EVENT_CHANCE_DEFAULT, EVENT_COOLDOWN, OPEN_STATUSES, sideNeeds, sideDue, CENSUS_DEPTH, dateHoursLeft, npcBdKey, npcBdOn, npcHoliday, giftJoint, trackedOccasions, charGiftOf, activeOccasions, occTier, preparingNow } from './calendar.js';
+import { phaseOf, mentionEvery, holidayId, allHolidays, banKeys, isBanned, namesMatch, passedThisYear, sameOccasion, hasGifts, openEvent, offeredEvent, EVENT_CHANCE_DEFAULT, EVENT_COOLDOWN, OPEN_STATUSES, sideNeeds, sideDue, CENSUS_DEPTH, dateHoursLeft, npcBdKey, npcBdOn, npcHoliday, giftJoint, trackedOccasions, charGiftOf, activeOccasions, occTier, preparingNow } from './calendar.js';
 import { buildStatePrompt, buildTagPrompt, buildSideMessages, buildDateReview, buildDateSideMessages, buildDateRefillMessages, giftTarget, hName, isGathering } from './prompts.js';
 import { inviteCandidates, bdKey, extraKey, mergeExtras, INVITE_TRIES, INVITE_COOL, INVITE_AHEAD } from './invites.js';
 import { listProfiles, gatherSources, loreFor, sendSide, reasonOf, withNote, canDirect, directActive } from './side.js';
@@ -805,7 +805,7 @@ function processReply(N) {
     }
     // ── Дополнительные праздники: на них позовут (бросок), в календаре — только принятые ──
     for (const x of extrasIn) x.name = occasionName(x.name, x.meaning, x.host);
-    if (extrasIn.length && mergeExtras(state, extrasIn, langOk, namesMatch)) slip = true;
+    if (extrasIn.length && mergeExtras(state, extrasIn, langOk, namesMatch, sameOccasion)) slip = true;
     if (extrasIn.length) console.info(`[Hearthtide] дополнительные праздники: ${extrasIn.map(x => `${x.name} (${isoOf(x.start)}, зовёт: ${x.host || '?'})`).join('; ')}`);
     if (askedCal || sideAsked.includes('extras')) state.lastExtrasTurn = state.turn;
     // ── Таймскип перепрыгнул принятое приглашение: пришли или нет ──
@@ -985,12 +985,16 @@ function processReply(N) {
     // ── Приглашение (день рождения, дополнительный праздник): прозвучало вслух — по проверке или по invite= ──
     handleInvite(small, conf, N, text);
     // что проверить коротким запросом после этого ответа: позвал ли {{char}} на свидание, позвал ли кто-то на праздник
+    // карточка приглашения ждёт ответа, а игрок с тех пор написал своё — не ответил ли он прямо в ролплее
+    const userMsg = (() => { for (let i = N - 1; i >= 0; i--) if (chat[i]?.is_user) return i; return null; })();
+    const pend = state.inv?.status === 'offered' && userMsg != null && state.inv.msg != null && userMsg > state.inv.msg
+        ? { key: state.inv.key, user: userMsg, host: state.inv.host || null, label: state.inv.kind === 'bday' ? `${state.inv.name}'s birthday` : state.inv.name } : null;
     confirmNeed = apiOn() && !conf ? {
-        N, hash: coreHash(text),
+        N, hash: coreHash(text), pend,
         date: !!(dateIn && !dateIn.started && !dateIn.agreed) || (hadDateRoll && !!state.datePlan && state.date?.status !== 'active'),
         inv: inviteWatch(text, hadInvRoll, small?.invite),
     } : null;
-    if (confirmNeed && !confirmNeed.date && !confirmNeed.inv.length) confirmNeed = null;
+    if (confirmNeed && !confirmNeed.date && !confirmNeed.inv.length && !confirmNeed.pend) confirmNeed = null;
 
     // ── Сегодня несколько праздников: главный — тот, что празднуют в ролплее ──
     updateFocus(sm?.focus);
@@ -1577,8 +1581,27 @@ function inviteMatch(name) {
 function handleInvite(small, conf, N, text = '') {
     const old = state.inv;
     if (old && state.today != null && state.today > old.day) state.inv = null;                       // день прошёл
+    // игрок ответил на приглашение своей репликой в ролплее, а не кнопкой — то же решение, что по кнопке
+    // (удаление его сообщения решение снимает: decMsg)
+    if (state.inv?.status === 'offered' && conf?.reply && conf.pend === state.inv.key) {
+        const iv = state.inv, yes = conf.reply === 'yes';
+        state.bdDecisions = { ...(state.bdDecisions || {}), [iv.key]: yes ? 'accepted' : 'declined' };
+        noteDecision('bd', iv.key, conf.userMsg ?? N);
+        iv.status = yes ? 'accepted' : 'declined';
+        if (!yes) {
+            state.invDeclined = { name: iv.kind === 'bday' ? L().birthday(iv.name) : iv.name, host: iv.host, turn: state.turn };
+            if (iv.kind === 'extra') rememberDeclined({ name: iv.name, cause: iv.host, start: iv.day });
+        } else if (N === lastBotIndex() && !offerAgreedToasted.has(iv.key)) {
+            offerAgreedToasted.add(iv.key);
+            window.toastr?.info?.(`${iv.kind === 'bday' ? L().bdPlanned : L().exPlanned}: ${iv.name}`, 'Hearthtide');
+        }
+        console.info(`[Hearthtide] приглашение «${iv.name}»: ответ ${getUserName()} в самой истории — ${yes ? '«да», принято' : '«нет», отклонено'} без кнопки`);
+    }
     if (state.inv?.status === 'offered' && state.turn - state.inv.turn > 6) {                       // не ответили — забылось
-        console.info(`[Hearthtide] приглашение «${state.inv.name}» осталось без ответа — забылось`);
+        // и больше не зовём на это же до его дня: раньше через 6 ответов приглашение снова бросалось, и чем ближе
+        // день, тем вернее (за 3 дня — 55 % каждый ответ) — звали на один и тот же праздник раз за разом
+        state.invCool = { ...(state.invCool || {}), [state.inv.key]: INV_FORGOT };
+        console.info(`[Hearthtide] приглашение «${state.inv.name}» осталось без ответа — забылось, больше не зовём`);
         state.inv = null;
     }
     if (state.inv?.status === 'offered') return;
@@ -1607,6 +1630,8 @@ function handleInvite(small, conf, N, text = '') {
     if (state.invRoll?.key === c.key) state.invRoll = null;
     console.info(`[Hearthtide] приглашение: ${c.kind === 'bday' ? 'день рождения' : 'праздник'} «${c.name}» на ${isoOf(c.day)}${dec ? ` (решение уже было: ${dec})` : ''}`);
 }
+/** Приглашение осталось без ответа — пауза «навсегда» (до его дня: ключ привязан к дате) */
+const INV_FORGOT = 1e9;
 /** Кого проверить «позвали ли вслух»: выпавшее приглашение и тех, о ком в ответе говорят вместе со словами о приглашении */
 const INVITE_WORDS = /(пригла|зов[уеё]|позов|позвал|ждём|ждем|жду\b|придёшь|придешь|придёте|придете|приходи|invit|come to|join us|expect you)/i;
 /** В тексте ответа и правда зовут: есть имя (именинника, праздника или того, кто зовёт) и слова приглашения */
@@ -1621,6 +1646,7 @@ function inviteWatch(text, rolled, marked = null) {
     const out = [];
     for (const c of inviteCandidates(state, true)) {
         if (state.bdDecisions?.[c.key] && c.key !== rolled?.key) continue;
+        if ((state.invCool?.[c.key] ?? -1) >= INV_FORGOT) continue;              // игрок так и не ответил — не переспрашиваем
         const named = [c.name, c.host].some(v => v && seenInStory(v, t));
         // проверяем выпавшее, отмеченное моделью (invite=) и тех, кого в ответе называют вместе со словами приглашения
         if (c.key === rolled?.key || (marked && inviteMatch(marked)?.key === c.key) || (asks && named)) out.push({ value: c.name, label: c.kind === 'bday' ? `${c.name}'s birthday` : `${c.name}${c.host ? ` (held by ${c.host})` : ''}` });
@@ -1823,7 +1849,13 @@ function offerDeclined(o) {
 function offerKnown(o) {
     if (passedThisYear(state, o.name, o.start)) return true;
     if (isBanned(state, o.name) || (state.offerNo || []).some(n => namesMatch(n, o.name)) || offerDeclined(o)) return true;
-    return (state.holidays || []).some(h => namesMatch(h.name, o.name) && Math.abs(h.start - o.start) <= 30);
+    // тот же повод: в календаре (и принятые приглашения), уже позвали или он ждёт приглашения как дополнительный праздник —
+    // то же название в пределах месяца или похожее (sameOccasion) почти в тот же день. Раньше сверялся только календарь:
+    // приглашение на «Празднование Дня юриста» помощник заносил ещё раз поводом «День юриста»
+    const same = (name, day) => day != null && ((namesMatch(name, o.name) && Math.abs(day - o.start) <= 30) || (Math.abs(day - o.start) <= 1 && sameOccasion(name, o.name)));
+    if (state.inv && state.inv.status !== 'declined' && same(state.inv.name, state.inv.day)) return true;
+    if ((state.extras || []).some(x => same(x.name, x.start))) return true;
+    return allHolidays(state).some(h => same(h.name, h.start));
 }
 
 /** Принять новые поводы из ответа; вернуть true, если что-то пришло не на том языке */
@@ -2432,7 +2464,7 @@ async function runConfirmSide(N) {
         const text = await sendSide(apiProfile(), buildConfirmMessages(ctxFor(), need, chat.slice(0, N + 1)), me.ctl.signal, 600);
         if (confirmSide !== me) return;
         res = parseConfirm(text, need);
-        console.info(`[Hearthtide] проверка «позвали ли вслух»: ${text.trim().replace(/\s+/g, ' ').slice(0, 160)} → свидание ${res.date ?? '—'}, приглашение ${res.inv || 'нет'}`);
+        console.info(`[Hearthtide] проверка «позвали ли вслух»: ${text.trim().replace(/\s+/g, ' ').slice(0, 160)} → свидание ${res.date ?? '—'}, приглашение ${res.inv || 'нет'}${need.pend ? `, ответ на «${need.pend.label}»: ${res.reply || 'нет ответа'}` : ''}`);
     } catch (e) {
         if (me.ctl.signal.aborted || confirmSide !== me) return;
         console.warn('[Hearthtide] проверка «позвали ли вслух» не прошла — верю отметкам основной модели:', reasonOf(e));
@@ -2443,7 +2475,7 @@ async function runConfirmSide(N) {
     if (!sameReply(N, me.swipe)) return;
     const m = chat[N];
     m.extra = m.extra || {};
-    m.extra.ht_confirm = { [coreHash(m.mes)]: { ...res, swipe: me.swipe, len: coreText(m.mes).length } };
+    m.extra.ht_confirm = { [coreHash(m.mes)]: { ...res, pend: need.pend?.key || null, userMsg: need.pend?.user ?? null, swipe: me.swipe, len: coreText(m.mes).length } };
     processReply(N);
 }
 
@@ -2455,9 +2487,10 @@ function buildConfirmMessages(ctx, need, msgs) {
     const q = [];
     if (need.date) q.push(`DATE: yes or no — in the LAST MESSAGE, does ${charName} actually ask ${userName} on a date or out somewhere together — said out loud to ${userName} (or written to her/him)? Only thinking about it, planning it in their head, or a vague hint — no.`);
     if (need.inv.length) q.push(`AGREED: yes or no — if someone invites ${userName} in the LAST MESSAGE: had ${userName}'s own message before it already asked to come or said yes to it? No if ${userName} hasn't answered yet.`);
+    if (need.pend) q.push(`REPLY: yes, no or none — ${need.pend.host || 'someone'} invited ${userName} to ${need.pend.label} earlier, and it is waiting for ${userName}'s answer. In ${userName}'s own message (the one before the LAST MESSAGE): does ${userName} accept it or say they will come (yes), turn it down or say they won't come (no), or not answer it (none)? Only ${userName}'s own words count.`);
     if (need.inv.length) q.push(`INVITE: one of the names below, or no — in the LAST MESSAGE, does someone actually invite ${userName} (alone or with ${charName}) to one of these — in person, by word, by a note or through someone: ${need.inv.map(x => `"${x.value}" — ${x.label}`).join('; ')}? Only mentioning it, planning or thinking of inviting — no. If yes, answer with its name exactly as quoted.`);
     return [
-        { role: 'system', content: 'You check one roleplay message for an extension. Answer in English with exactly the lines asked, each starting with its label (DATE:, INVITE:), one per line — no explanations, no other text.' },
+        { role: 'system', content: 'You check one roleplay message for an extension. Answer in English with exactly the lines asked, each starting with its label (DATE:, INVITE:, REPLY:), one per line — no explanations, no other text.' },
         { role: 'user', content: `${prev ? `[${userName}, before it]\n${clean(prev.mes).slice(-800)}\n\n` : ''}[LAST MESSAGE]\n${clean(last?.mes).slice(-3500)}\n\n${q.join('\n')}` },
     ];
 }
@@ -2489,7 +2522,10 @@ function parseConfirm(text, need) {
     }
     // {{user}} сам напросился или уже сказал «да» — приглашение принято без карточки
     const agreed = !!inv && /AGREED\s*[:=|-]\s*["'«]?\s*(yes|да)\b/i.test(t);
-    return { date, inv, agreed };
+    // ответ игрока на висящее приглашение — его собственной репликой в ролплее
+    const rm = need.pend ? t.match(/REPLY\s*[:=|-]\s*["'«]?\s*(yes|no|none|да|нет)\b/i) : null;
+    const reply = rm ? (/^(yes|да)/i.test(rm[1]) ? 'yes' : /^(no|нет)/i.test(rm[1]) ? 'no' : null) : null;
+    return { date, inv, agreed, reply };
 }
 
 // ─── Свидание: отдельный короткий запрос помощника после каждого ответа ───

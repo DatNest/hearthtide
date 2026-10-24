@@ -48,8 +48,11 @@ function askDirect(messages, maxTokens, signal) {
         }
     };
     const p = directQueue.then(run, run);
-    directQueue = p.catch(() => {});
-    return p;
+    // зависший запрос не держит очередь: отмена или тайм-аут (sendSide) отпускают следующий
+    const gone = new Promise((_, rej) => signal?.addEventListener('abort', () => rej(new Error('запрос отменён')), { once: true }));
+    const out = Promise.race([p, gone]);
+    directQueue = out.catch(() => {});
+    return out;
 }
 
 /** Профили подключения, которые подходят для запроса (chat и text completion) */
@@ -116,6 +119,9 @@ const BRIEF = 'Think briefly if at all — a few lines at most — then answer a
 const BRIEF_HARD = 'Your previous attempt spent the whole limit on thinking and gave no answer. Do NOT think this time: write the requested lines immediately.';
 const MIN_TOKENS = 2000;      // лимит — потолок: обычной модели он ничего не стоит, а думающей оставляет место на ответ
 const RETRY_TOKENS = 8000;      // не выше 8192: часть API (DeepSeek и др.) отклоняет больший лимит
+/** Сколько ждать ответа помощника: некоторые API (замечено на gemini через прокси) не отвечают и не закрывают запрос — без
+ * тайм-аута проверка «позвали ли вслух» и заметки висели вечно, а карточки и инфоблок не обновлялись */
+const SIDE_TIMEOUT = 150000;
 
 // Карточка, персона, лорбук и история часто содержат указания для автора ролплея («пиши за персонажа, не выходи из роли»).
 // Модели с рассуждениями принимают их на свой счёт, видят «противоречие» с заданием и ничего не отвечают.
@@ -144,12 +150,26 @@ export async function sendSide(profileId, messages, signal, maxTokens = 4000) {
     if (profileId && !svc && canDirect()) { console.info('[Hearthtide] Connection Manager выключен — помощник идёт через текущее подключение таверны'); profileId = ''; }
     if (profileId && !svc) throw new Error('Connection Manager недоступен (расширение выключено или таверна слишком старая)');
     if (!profileId && !canDirect()) throw new Error('нет ни профиля подключения, ни текущего подключения таверны (таверна слишком старая)');
-    const ask = async (msgs, n) => {
-        if (!profileId) return askDirect(msgs, n, signal);
+    const once = async (msgs, n, sig) => {
+        if (!profileId) return askDirect(msgs, n, sig);
         const res = await svc.sendRequest(profileId, msgs, n, {
-            stream: false, signal, extractData: true, includePreset: false, includeInstruct: true,
+            stream: false, signal: sig, extractData: true, includePreset: false, includeInstruct: true,
         });
         return { text: String(typeof res === 'string' ? res : (res?.content ?? '')), reasoning: typeof res === 'string' ? '' : String(res?.reasoning ?? '') };
+    };
+    // свой сигнал: отменяется вместе с внешним или по тайм-ауту
+    const ask = async (msgs, n) => {
+        const ctl = new AbortController();
+        const stop = () => ctl.abort();
+        signal?.addEventListener('abort', stop, { once: true });
+        let timer;
+        const late = new Promise((_, rej) => { timer = setTimeout(() => { ctl.abort(); rej(new Error(`модель не ответила за ${SIDE_TIMEOUT / 1000} с — запрос прерван`)); }, SIDE_TIMEOUT); });
+        try {
+            return await Promise.race([once(msgs, n, ctl.signal), late]);
+        } finally {
+            clearTimeout(timer);
+            signal?.removeEventListener('abort', stop);
+        }
     };
     const first = Math.max(maxTokens, MIN_TOKENS);
     // пояснение о «чужих» указаниях — в начало системного сообщения
