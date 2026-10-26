@@ -1092,3 +1092,16 @@ dialog.ht-modal:not([open]) { display: none; }
 .ht-ring-off::after { animation: none; border-color: var(--ht-line); }
 .ht-ring-off > i { animation: none; color: var(--ht-mute); }
 .ht-noapi .ht-head { cursor: default; }
+
+/* Первый слот и выбор романтической цели */
+.ht-cc-target-empty {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 9px; min-height: 185px; text-align: center;
+    border-style: dashed !important; border-color: rgba(187, 170, 194, .55) !important;
+    background: rgba(130, 143, 160, .045) !important;
+}
+.ht-cc-target-empty > i { font-size: 25px; color: var(--ht-accent, #bc91ab); opacity: .8; }
+.ht-cc-target-empty > b { font-size: 12px; line-height: 1.35; }
+.ht-cc-target-empty > span { font-size: 10px; max-width: 120px; line-height: 1.4; opacity: .7; }
+.ht-cc-tools [data-act="cast-target"] { color: #e5aac7; }
+.ht-cc-tools [data-act="cast-target"]:hover { color: #ffcde3; }

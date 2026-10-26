@@ -122,7 +122,11 @@ function defaultState() {
         lastEventEnd: -99,
         evRoll: false,          // выпал шанс: в следующем ответе (или запросе помощника) предложить случайный ивент
         evDecisions: {},        // решения игрока по ивентам (по названию): accepted | declined — переживают свайпы
-        pair: null,             // {{char}} и {{user}}: { f: дружба −100…100, r: романтика −100…100, note }; null — ещё не ясно
+        narratorMode: true,    // рассказчик: основная карточка не является парой игрока
+        romanceTargetId: null, // игрок выбирает персонажа из списка людей
+        romanceSessions: {}, // данные отношений и свиданий отдельно по каждой цели
+        activeRomanceKey: '__main__',
+        pair: null,             // активная пара: { f, r, note }; null — ещё не определена
         pairDrop: -99,          // когда дружба заметно упала (ссора) — шанс свидания выше
         pairSet: null,          // правка игрока: { pair, at } — ответы до at включительно её не перезаписывают
         lastBondTurn: -99,      // когда основная модель (или помощник) последний раз прислали bond
@@ -219,6 +223,61 @@ function splitPlan(plan) {
     }
     return plan;
 }
+// Романтическая линия относится либо к обычной карточке, либо к выбранному человеку.
+// Переключение не меняет календарь, список людей и прочее состояние истории.
+const ROMANCE_FIELDS = [
+    'pair', 'pairSet', 'pairDrop', 'lastBondTurn', 'bondMiss', 'bondSide',
+    'dateRollTry', 'datePlan', 'dateRecapFor', 'dateRecapTurn', 'dateMissed',
+    'dateSeenMsg', 'date', 'dateRoll', 'lastDateEnd', 'datesDone',
+    'dateDecisions', 'pairKnown', 'dateDeclined',
+];
+const initialRomance = () => {
+    const fresh = defaultState();
+    return Object.fromEntries(ROMANCE_FIELDS.map(k => [k, clone(fresh[k] ?? null)]));
+};
+function validRomanceTarget(st = state) {
+    if (!st?.narratorMode || !st.romanceTargetId) return null;
+    const person = (st.cast || []).find(c => c.id === st.romanceTargetId);
+    return person?.name && !person.off ? person : null;
+}
+function currentRomanceKey(st = state) {
+    return !st?.narratorMode ? '__main__' : validRomanceTarget(st)?.id || '__none__';
+}
+function switchRomanceContext(st = state) {
+    if (!st) return;
+    st.romanceSessions ||= {};
+    const newKey = currentRomanceKey(st);
+    if (st.activeRomanceKey === newKey) return;
+    if (st.activeRomanceKey) st.romanceSessions[st.activeRomanceKey] = Object.fromEntries(ROMANCE_FIELDS.map(k => [k, clone(st[k] ?? null)]));
+    const entry = st.romanceSessions[newKey] || initialRomance();
+    for (const k of ROMANCE_FIELDS) st[k] = clone(entry[k] ?? initialRomance()[k]);
+    st.activeRomanceKey = newKey;
+    // Без назначенного человека не существует романтической пары.
+    if (newKey === '__none__') { st.pair = null; st.date = null; st.dateRoll = false; st.datePlan = null; }
+}
+function setRomanceTarget(cid) {
+    if (!state?.narratorMode) return;
+    if (cid && !(state.cast || []).some(p => p.id === cid && p.name && !p.off)) return;
+    state.romanceTargetId = cid || null;
+    switchRomanceContext();
+    // Выбор игрока сохраняется даже после свайпа на более ранний ответ.
+    applyToSnapshots(st => { st.romanceTargetId = cid || null; st.narratorMode = true; });
+    cancelSide();
+    saveState();
+    injectPrompts();
+    renderAll();
+}
+function setNarratorMode(enabled) {
+    if (!state) loadState();
+    state.narratorMode = !!enabled;
+    switchRomanceContext();
+    applyToSnapshots(st => { st.narratorMode = !!enabled; });
+    cancelSide();
+    saveState();
+    injectPrompts();
+    renderAll();
+}
+
 function loadState() {
     if (!chat_metadata[META_KEY]) chat_metadata[META_KEY] = defaultState();
     state = chat_metadata[META_KEY];
@@ -255,6 +314,7 @@ function loadState() {
     if (state.setting?.place) state.setting.place = tidyPlace(state.setting.place);
     // люди из старых версий: роли, родня по сторонам, романтика — кнопками
     migrateCast(state, getUserName(), getCharName());
+    switchRomanceContext();
     // свидание из прошлой версии: шаги разом и шкала с 35 % → живые шаги
     migrateDate(state);
     // узнанное друг о друге — теперь общее для пары; из прошлой версии берём то, что было в последнем свидании
@@ -287,6 +347,13 @@ function saveState() {
 }
 
 const getUserName = () => name1 || 'User';
+function romanceCharacterName() {
+    return state?.narratorMode ? validRomanceTarget()?.name || null : getCharName();
+}
+function romanceAvatarUrl() {
+    const person = validRomanceTarget();
+    return state?.narratorMode ? person && avatars()[person.id] : charAvatarUrl();
+}
 function getCharName() {
     const c = this_chid !== undefined ? characters[this_chid] : null;
     return c?.name || 'the characters';
@@ -311,6 +378,8 @@ function ctxFor() {
         state, phase,
         tracked: trackedOccasions(state),
         userName: getUserName(), charName: getCharName(),
+        narratorMode: !!state.narratorMode,
+        romanceName: state.narratorMode ? validRomanceTarget()?.name || null : getCharName(),
         part: dayPart(state.clock),
         placeName,
         placeUnnamed: !!placeName && GENERIC_PLACES.test(String(placeName).trim()),
@@ -350,14 +419,22 @@ function takeSnapshot(beforeMsg) {
     if (state.snapshots.length > 20) state.snapshots = state.snapshots.slice(-20);
 }
 // Решения игрока (удалённые праздники) переживают откаты
-const USER_FIELDS = ['readyNo', 'banned', 'bannedNames', 'birthdayOff', 'calIgnore', 'offerNo', 'offerSeen', 'evDecisions', 'castNo', 'dateDecisions', 'pairSet', 'bdDecisions', 'userGift', 'giftMode', 'decMsg'];
+const USER_FIELDS = ['readyNo', 'banned', 'bannedNames', 'birthdayOff', 'calIgnore', 'offerNo', 'offerSeen', 'evDecisions', 'castNo', 'dateDecisions', 'pairSet', 'narratorMode', 'romanceTargetId', 'romanceSessions', 'bdDecisions', 'userGift', 'giftMode', 'decMsg'];
 
 function restoreSnapshot(snap) {
+    // Если цель выбрали после создания снимка, её текущие данные не должны
+    // подменяться данными рассказчика из старого снимка при свайпе.
+    const liveKey = state.activeRomanceKey;
+    const liveRomance = Object.fromEntries(ROMANCE_FIELDS.map(k => [k, clone(state[k] ?? null)]));
     const keep = state.snapshots;
     const user = Object.fromEntries(USER_FIELDS.map(k => [k, clone(state[k] ?? null)]));
     Object.assign(state, clone(snap.data));
     for (const [k, v] of Object.entries(user)) if (v != null) state[k] = v;
     state.snapshots = keep;
+    if (liveKey === currentRomanceKey() && liveKey !== state.activeRomanceKey) {
+        for (const k of ROMANCE_FIELDS) state[k] = clone(liveRomance[k]);
+        state.activeRomanceKey = liveKey;
+    } else switchRomanceContext();
     // пару, выставленную игроком, снимок из времени до правки не отменяет (более поздние уже ведут её дальше)
     if (state.pairSet?.pair && snap.beforeMsg <= state.pairSet.at) state.pair = clone(state.pairSet.pair);
     // удалённые игроком праздники не возвращаются вместе со старым снимком
@@ -678,6 +755,7 @@ function processReply(N) {
     const extrasIn = [...parseExtras(src), ...(sideText ? parseExtras(sideText) : [])];
     const planIn = sideText && sideAsked.includes('dateplan') ? parseDateBlock(sideText) : null;
     let dateIn = parseDateBlock(src) || (sideText && sideAsked.includes('datewatch') ? parseDateBlock(sideText) : null);
+    if (state.narratorMode && !validRomanceTarget()) dateIn = null;
     // Позвали ли вслух — короткий отдельный запрос «да/нет» (при помощнике). Нет ответа — ждём его; запрос упал — верим основной модели
     const conf = recOf(msg, 'ht_confirm', text);
     // {{char}} позвал по плану помощника — приглашение из плана: место и время тоже из плана.
@@ -824,7 +902,7 @@ function processReply(N) {
     if (sideAsked.includes('bond')) state.bondSide = state.turn;
 
     // ── {{char}} и {{user}}: дружба и романтика ──
-    if (sm?.bond) {
+    if (sm?.bond && (!state.narratorMode || validRomanceTarget())) {
         if (sm.bondNote && !langOk(sm.bondNote)) slip = true;
         const prev = state.pair;
         if (prev && sm.bond.f <= prev.f - 15) state.pairDrop = state.turn;       // заметно поссорились
@@ -841,7 +919,7 @@ function processReply(N) {
         state.pair = { scale: 2, f, r: kin ? 0 : r, kin, note: sm.bondNote && langOk(sm.bondNote) ? sm.bondNote : prev?.note || null };
         state.lastBondTurn = state.turn;
         state.bondMiss = 0;
-    } else if (!state.pair && (small || sideRec)) {
+    } else if ((!state.narratorMode || validRomanceTarget()) && !state.pair && (small || sideRec)) {
         state.bondMiss = (state.bondMiss || 0) + 1;                              // напомним в следующем ответе
     }
     // игрок поправил пару сам — ответы до его правки её не перезаписывают (свайп, повторная обработка)
@@ -885,7 +963,7 @@ function processReply(N) {
             dd.goal = goalForm(dd.goal, dd.kind);
         }
         if ((dd.taskV || 0) < 2) {
-            const c = getCharName(), u = getUserName();
+            const c = romanceCharacterName() || getCharName(), u = getUserName();
             const kept = [];
             for (const st of openSteps(dd)) {
                 const kinds = stepKinds(st.t);
@@ -949,7 +1027,7 @@ function processReply(N) {
         for (const who of ['char', 'user']) {
             const list = up.know[who].slice(0, 6);
             if (!list.length) continue;
-            console.info(`[Hearthtide] что знают друг о друге (${who === 'char' ? getCharName() : getUserName()}): ${(pk[who] || []).length} → ${list.length} — ${list.join('; ')}`);
+            console.info(`[Hearthtide] что знают друг о друге (${who === 'char' ? (romanceCharacterName() || getCharName()) : getUserName()}): ${(pk[who] || []).length} → ${list.length} — ${list.join('; ')}`);
             pk[who] = list;
         }
     }
@@ -1156,8 +1234,8 @@ function processReply(N) {
     // ── Свидание: бросок после ответа (есть романтика; после ссоры шанс выше) ──
     // Выпало, а модель промолчала — просим ещё раз, настойчивее (один раз); потом — новый бросок
     // свободно — всё, кроме идущего, предложенного и намеченного (раньше «не состоялось» навсегда блокировало броски)
-    const free = !['active', 'offered', 'scheduled', 'pending'].includes(state.date?.status);
-    const di = dateChanceInfo(state, state.turn, dateChanceSetting());
+    const free = (!state.narratorMode || !!validRomanceTarget()) && !['active', 'offered', 'scheduled', 'pending'].includes(state.date?.status);
+    const di = dateChanceInfo(state, state.turn, state.narratorMode && !validRomanceTarget() ? 0 : dateChanceSetting());
     if (free && hadDateRoll && !dateIn && !conf && state.datePlan && di.chance > 0) {
         // проверка «позвали ли вслух» ещё не ответила — ответ обработается заново, когда она придёт
         state.dateRoll = true;
@@ -2358,7 +2436,9 @@ function viewSnapshot(phase) {
             parts: state.recaps.find(r => r.hid === i.id)?.parts || null,
         })),
         flashbacks: clone(state.flashbacks.slice(-10).reverse()),
-        pair: state.pair ? clone(state.pair) : null,
+        pair: state.pair && (!state.narratorMode || validRomanceTarget()) ? clone(state.pair) : null,
+        narratorMode: !!state.narratorMode,
+        romanceTargetId: validRomanceTarget()?.id || null,
         // намеченное свидание — в инфоблоке, праздник сейчас или нет
         planned: state.date?.status === 'scheduled' ? { title: state.date.title, goal: state.date.goal, where: state.date.where, when: dateWhenText(state, state.date.at), friendly: isFriendlyDate(state.date) } : null,
         // принятое приглашение впереди (если это не тот праздник, что сейчас в шапке)
@@ -2629,6 +2709,9 @@ function maybeSide(N, force = false, extra = []) {
     if (recFresh(msg, 'ht_side', msg.mes) && !force) return;       // к этому тексту уже есть
     const phase = phaseOf(state);
     const needs = sideNeeds(state, phase);
+    if (state.narratorMode && !validRomanceTarget()) {
+        for (const k of ['bond', 'datewatch', 'dateplan', 'date', 'daterecap']) needs.delete(k);
+    }
     for (const k of extra) needs.add(k);
     if (force) needs.add('new');
     else if (!sideDue(state, phase, needs)) return;
@@ -3075,7 +3158,7 @@ function dateLastsText(d) {
 }
 /** «Узнали друг о друге»: свёрнуто, два столбика — что знает {{char}} о {{user}} и {{user}} о {{char}} */
 function learnedHtml(d) {
-    const c = getCharName(), u = getUserName();
+    const c = romanceCharacterName() || getCharName(), u = getUserName();
     const lc = d.learned?.char || [], lu = d.learned?.user || [];
     // узнанное на прошлых свиданиях — приглушённо, ниже
     const before = (who, now) => (state.pairKnown?.[who] || []).filter(x => !now.includes(x)).slice(-5);
@@ -3088,10 +3171,10 @@ function dateCardHtml() {
     const d = state?.date;
     if (!d || (d.status !== 'offered' && d.status !== 'active')) return '';
     const fresh = freshFor(`date:${d.id}:${d.status}`);
-    const u = getUserName(), c = getCharName();
+    const u = getUserName(), c = romanceCharacterName();
     // дружеская встреча: зелёная, без сердечек
     const fr = isFriendlyDate(d), fc = fr ? ' ht-friendly' : '', ic = fr ? 'fa-handshake' : 'fa-heart';
-    const portrait = `<span class="ht-portrait">${avaHtml(charAvatarUrl(), c)}<span class="ht-ava-pin">${avaHtml(userAvatarUrl(), u, 'ht-ava-round')}</span></span>`;
+    const portrait = `<span class="ht-portrait">${avaHtml(romanceAvatarUrl(), c)}<span class="ht-ava-pin">${avaHtml(userAvatarUrl(), u, 'ht-ava-round')}</span></span>`;
     if (d.status === 'offered') {
         const when = [d.where, dateWhenText(state, d.at)].filter(Boolean).join(' · ');
         return `<div class="ht-offer ht-date${fc}${fresh ? ' ht-offer-new' : ''}">
@@ -3288,13 +3371,22 @@ function castTabHtml(view, live) {
 
     // {{char}} и {{user}} — первая карточка, шире остальных, видна всегда; романтика — розовая подсветка и бьющееся сердце.
     // Пока модель не прислала bond — нули и «пока не ясно»; игрок может выставить сам
-    const pr = view.pair || { ...PAIR_DEFAULT, unknown: true };
+    const narrator = !!state?.narratorMode;
+    const featured = narrator ? validRomanceTarget() : null;
+    const pr = (narrator ? state.pair : view.pair) || { ...PAIR_DEFAULT, unknown: true };
+    const featuredName = narrator ? featured?.name || null : c;
+    const featuredAvatar = narrator && featured ? avatars()[featured.id] : cA;
     const rl = romLevel(pr.r);
     const dateLine = live ? dateWhyText() : '';
     // {{char}} — портрет в подсвеченной рамке; {{user}} — маленький круглый значок, прикреплённый сбоку
-    const pair = tab === 'all' ? `<div class="ht-cc ht-cc-pair${pr.r > 0 ? ' ht-cc-love' : ''}${pr.unknown ? ' ht-cc-unknown' : ''}">
-        <span class="ht-portrait">${avaHtml(cA, c)}<span class="ht-ava-pin" title="${esc(u)}">${avaHtml(uA, u, 'ht-ava-round')}</span>${pr.r > 0 ? '<i class="fa-regular fa-heart ht-pair-mid"></i>' : ''}</span>
-        <b class="ht-cc-name">${esc(c)}</b>
+    const emptyPair = `<div class="ht-cc ht-cc-pair ht-cc-target-empty">
+        <i class="fa-solid fa-heart-circle-plus"></i>
+        <b>${esc(L().targetEmpty)}</b>
+        <span>${esc(L().targetHint)}</span>
+    </div>`;
+    const pair = tab === 'all' && narrator && !featured ? emptyPair : tab === 'all' ? `<div class="ht-cc ht-cc-pair${pr.r > 0 ? ' ht-cc-love' : ''}${pr.unknown ? ' ht-cc-unknown' : ''}">
+        <span class="ht-portrait">${avaHtml(featuredAvatar, featuredName)}<span class="ht-ava-pin" title="${esc(u)}">${avaHtml(uA, u, 'ht-ava-round')}</span>${pr.r > 0 ? '<i class="fa-regular fa-heart ht-pair-mid"></i>' : ''}</span>
+        <b class="ht-cc-name">${esc(featuredName)}</b>
         <div class="ht-pair-bars">
             <div class="ht-mini" title="${esc(`${L().friendship}: ${signed(pr.f)} · ${L().rel[relLevel(pr.f)]}`)}"><span class="ht-mini-row"><i class="fa-solid fa-handshake ht-mini-ico"></i>${esc(L().friendship)}<b>${signed(pr.f)}</b></span>${barHtml(pr.f)}</div>
             ${pr.kin ? '' : `<div class="ht-mini ht-mini-rom" title="${esc(`${L().romance}: ${signed(pr.r)} · ${L().rom[rl]}`)}"><span class="ht-mini-row"><i class="fa-solid fa-heart ht-mini-ico"></i>${esc(L().romance)}<b>${signed(pr.r)}</b></span>${barHtml(pr.r)}</div>`}
@@ -3303,12 +3395,13 @@ function castTabHtml(view, live) {
             <p>${esc(pr.unknown ? L().pairUnknown : pr.note || `${L().rel[relLevel(pr.f)]} · ${L().rom[rl]}`)}</p>
             ${dateLine ? `<p><b>${esc(L().dateWord)}:</b> ${esc(dateLine)}</p>` : ''}
         </details>
-        ${live ? `<div class="ht-cc-tools"><button data-act="pair-edit" title="${esc(L().pairEdit)}" aria-label="${esc(L().pairEdit)}"><i class="fa-solid fa-pen"></i></button></div>` : ''}
+        ${live ? `<div class="ht-cc-tools">${narrator ? `<button data-act="cast-target-clear" title="${esc(L().targetClear)}" aria-label="${esc(L().targetClear)}"><i class="fa-solid fa-xmark"></i></button>` : ''}<button data-act="pair-edit" title="${esc(L().pairEdit)}" aria-label="${esc(L().pairEdit)}"><i class="fa-solid fa-pen"></i></button></div>` : ''}
     </div>` : '';
 
     const ava = avatars();
     const card = (p) => {
         const key = `cast:${p.id}`;
+        if (narrator && featured?.id === p.id) return '';
         const d = p.bdayIn;
         const near = d != null && d <= 30 ? (d === 0 ? ' ht-bd-today' : d <= 7 ? ' ht-bd-near' : ' ht-bd-soon') : '';
         // имя история ещё не назвала — подпись по роли («Мать Нины»), а не «без имени»
@@ -3328,6 +3421,7 @@ function castTabHtml(view, live) {
                 <p><b>${esc(c)}:</b> ${esc(p.note?.char || L().rel[relLevel(p.rel?.char ?? 0)])}</p>
             </details>
             ${live ? `<div class="ht-cc-tools">
+                ${narrator && p.name && !p.off ? `<button data-act="cast-target" data-cid="${esc(p.id)}" title="${esc(L().targetChoose)}" aria-label="${esc(L().targetChoose)}"><i class="fa-regular fa-heart"></i></button>` : ''}
                 <button data-act="cast-eye" data-cid="${esc(p.id)}" title="${esc(p.off ? L().castOn : L().castOff)}" aria-pressed="${!p.off}"><i class="fa-solid ${p.off ? 'fa-eye-slash' : 'fa-eye'}"></i></button>
                 <button data-act="cast-edit" data-cid="${esc(p.id)}" title="${esc(L().edit)}"><i class="fa-solid fa-pen"></i></button>
                 <button class="${confirm ? 'ht-del-confirm' : ''}" data-act="cast-del" data-cid="${esc(p.id)}" title="${esc(confirm ? L().removeSure : L().remove)}"><i class="fa-solid ${confirm ? 'fa-check' : 'fa-trash-can'}"></i></button>
@@ -3554,6 +3648,7 @@ function toggleCastOff(cid) {
     const x = (state.cast || []).find(c => c.id === cid);
     if (!x) return;
     const off = !x.off;
+    if (off && state.narratorMode && state.romanceTargetId === cid) setRomanceTarget(null);
     const apply = (st) => { const y = (st.cast || []).find(c => c.id === cid); if (y) y.off = off; };
     apply(state);
     applyToSnapshots(apply);
@@ -3565,6 +3660,7 @@ function toggleCastOff(cid) {
 function removeCast(cid) {
     const cur = (state.cast || []).find(c => c.id === cid);
     if (!cur) return;
+    if (state.narratorMode && state.romanceTargetId === cid) setRomanceTarget(null);
     if (cur.name) state.castNo = [...(state.castNo || []).filter(n => !samePerson(n, cur.name)), cur.name].slice(-60);
     const apply = (st) => { st.cast = (st.cast || []).filter(c => c.id !== cid && !(cur.name && samePerson(c.name, cur.name))); };
     apply(state);
@@ -3599,7 +3695,9 @@ function openPairEditor() {
 function openPairEditorRaw() {
     closeCastEditor();
     const pr = state.pair || { ...PAIR_DEFAULT };
-    const u = getUserName(), c = getCharName();
+    const u = getUserName(), c = state.narratorMode ? validRomanceTarget()?.name : getCharName();
+    if (!c) return;
+    const mainAvatar = state.narratorMode ? avatars()[validRomanceTarget().id] : charAvatarUrl();
     const native = typeof HTMLDialogElement === 'function' && 'showModal' in HTMLDialogElement.prototype;
     const wrap = document.createElement(native ? 'dialog' : 'div');
     wrap.className = 'ht-modal';
@@ -3611,7 +3709,7 @@ function openPairEditorRaw() {
     wrap.innerHTML = `<div class="ht-modal-card">
         <div class="ht-modal-title"><i class="fa-solid fa-heart"></i>${esc(L().pairTitle(c, u))}<button type="button" data-act="edit-cancel" aria-label="${esc(L().cancel)}"><i class="fa-solid fa-xmark"></i></button></div>
         <div class="ht-edit ht-pair-edit">
-            <span class="ht-portrait ht-portrait-lg">${avaHtml(charAvatarUrl(), c)}<span class="ht-ava-pin">${avaHtml(userAvatarUrl(), u, 'ht-ava-round')}</span></span>
+            <span class="ht-portrait ht-portrait-lg">${avaHtml(mainAvatar, c)}<span class="ht-ava-pin">${avaHtml(userAvatarUrl(), u, 'ht-ava-round')}</span></span>
             ${range('f', 'fa-handshake', L().friendship, pr.f)}
             <label class="ht-pair-kin"><input type="checkbox" data-ed="kin" ${pr.kin ? 'checked' : ''}>${esc(L().pairKin)}</label>
             <div class="ht-pair-rom"${pr.kin ? ' hidden' : ''}>${range('r', 'fa-heart', L().romance, pr.r)}</div>
@@ -3645,6 +3743,7 @@ function openPairEditorRaw() {
 /** Будет ли свидание после ответа и почему нет — для карточки пары и настроек */
 function dateWhyText() {
     if (!state) return '';
+    if (state.narratorMode && !validRomanceTarget()) return L().targetMissing;
     const di = dateChanceInfo(state, state.turn || 0, dateChanceSetting());
     const w = L().dateWhy;
     if (di.why === 'norom') return w.norom(di.r);
@@ -3669,7 +3768,7 @@ function showDateInvite(d) {
     el.setAttribute('role', 'status');
     el.innerHTML = `<button type="button" class="ht-invite-card">
         <span class="ht-invite-hearts" aria-hidden="true">${`<i class="fa-solid ${d.icon || (fr ? 'fa-handshake' : 'fa-heart')}"></i>`.repeat(3)}</span>
-        <span class="ht-invite-text"><b>${esc(d.head || (fr ? L().outingInvite(getCharName()) : L().dateInvite(getCharName())))}</b><span>${esc(d.title)}</span><em>${esc(L().dateTap)}</em></span>
+        <span class="ht-invite-text"><b>${esc(d.head || (fr ? L().outingInvite(romanceCharacterName() || getCharName()) : L().dateInvite(romanceCharacterName() || getCharName())))}</b><span>${esc(d.title)}</span><em>${esc(L().dateTap)}</em></span>
     </button>`;
     let gone = false;
     const close = () => { if (gone) return; gone = true; el.classList.add('ht-out'); setTimeout(() => el.remove(), 320); };
@@ -4048,6 +4147,10 @@ function bindBlock(block) {
         } else if (t.dataset.act === 'cast-tab') {
             ui.castTab = t.dataset.tab;
             renderBlock(id);
+        } else if (t.dataset.act === 'cast-target') {
+            setRomanceTarget(t.dataset.cid);
+        } else if (t.dataset.act === 'cast-target-clear') {
+            setRomanceTarget(null);
         } else if (t.dataset.act === 'cast-eye') {
             toggleCastOff(t.dataset.cid);
         } else if (t.dataset.act === 'cast-rom') {
@@ -4225,6 +4328,11 @@ function injectSettingsPanel() {
                 </section>
                 <section class="ht-set-sec">
                     <div class="ht-set-title"><i class="fa-solid fa-heart"></i>Романтика</div>
+                    <div class="ht-set-row" title="В режиме рассказчика основная карточка не считается романтическим партнёром. Цель выбирается вручную среди людей чата.">
+                        <span>Режим рассказчика <small>· этот чат</small></span>
+                        <input type="checkbox" id="ht-set-narrator" ${state?.narratorMode ? 'checked' : ''}>
+                    </div>
+                    <small class="ht-set-note"><i class="fa-regular fa-heart"></i><span>Романтическая цель выбирается в разделе «Люди». Пока цель не выбрана, свидания не запускаются.</span></small>
                     <div class="ht-set-row" title="Как часто чар сам зовёт на свидание после ответа. После ссоры — в 2,5 раза чаще. Свидания из самого ролплея от этого не зависят.">
                         <span>Случайные свидания</span>
                         <input type="range" id="ht-set-datechance" min="0" max="30" step="1" value="${dateChanceSetting()}">
@@ -4273,6 +4381,10 @@ function injectSettingsPanel() {
             localStorage.setItem(LS.evChance, e.target.value);
             const v = document.getElementById('ht-set-evchance-val');
             if (v) v.textContent = +e.target.value ? `${e.target.value}%` : 'выкл.';
+        });
+        document.getElementById('ht-set-narrator')?.addEventListener('change', e => {
+            setNarratorMode(e.target.checked);
+            updateDateWhy();
         });
         document.getElementById('ht-set-datechance')?.addEventListener('input', e => {
             localStorage.setItem(LS.dateChance, e.target.value);

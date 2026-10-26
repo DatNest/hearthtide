@@ -146,6 +146,9 @@ const userGiftOf = (state, h) => (h?.npc && !giftJoint(state, h) ? state.userGif
 /** В этом ответе уже есть главная просьба (позвать, ивент, свидание) — второстепенные подталкивания не добавляем */
 const busyReply = (state) => !!(state.invRoll || state.dateRoll || state.evRoll || state.date?.status === 'active' || (state.skipAsk || []).length);
 
+const partnerCtx = (ctx) => ctx.narratorMode && ctx.romanceName
+    ? { ...ctx, charName: ctx.romanceName } : ctx;
+
 export function buildStatePrompt(ctx) {
     const { state, phase, userName, charName } = ctx;
     const busy = busyReply(state);
@@ -257,14 +260,17 @@ export function buildStatePrompt(ctx) {
     // игрок только что отказался — без нажима
     const evNo = ctx.evTarget ? (state.evts || []).find(e => e.hid === ctx.evTarget.hid && e.status === 'declined' && e.lastUpdate >= state.turn) : null;
     if (evNo) lines.push(`${userName} let "${evNo.title}" pass — it goes on without ${userName} or fades; don't push it.`);
-    if (state.dateDeclined?.turn >= state.turn) lines.push(`${userName} said no to the date (${state.dateDeclined.title}) — ${charName} takes it in ${charName}'s own way.`);
+    if (ctx.narratorMode) lines.push(ctx.romanceName
+        ? `Romance tracking is exclusively for ${ctx.romanceName} and ${userName}. ${charName} is the narrator/world card, not a participant in that pair. Other characters remain independent NPCs; do not substitute the narrator for ${ctx.romanceName}.`
+        : `No romantic partner has been chosen for ${userName}. ${charName} is a narrator/world card, not a romantic participant. Do not assign romance, friendship scores, dates or romantic advances to that card. Characters in the story remain NPCs until the player selects one in Hearthtide.`);
+    if (state.dateDeclined?.turn >= state.turn) lines.push(`${userName} said no to the date (${state.dateDeclined.title}) — ${ctx.romanceName || charName} takes it in their own way.`);
 
     // {{char}} и {{user}}: как они сейчас
-    if (state.pair) lines.push(state.pair.kin
-        ? `${charName} and ${userName} are family to each other: closeness ${state.pair.f} (−100…100, 0 neutral)${state.pair.note ? ` — ${state.pair.note}` : ''}; no romance between them.`
-        : `${charName} and ${userName}: friendship ${state.pair.f}, romance ${state.pair.r} (both −100…100, 0 neutral)${state.pair.note ? ` — ${state.pair.note}` : ''}.`);
+    if (state.pair && (!ctx.narratorMode || ctx.romanceName)) lines.push(state.pair.kin
+        ? `${ctx.romanceName || charName} and ${userName} are family to each other: closeness ${state.pair.f} (−100…100, 0 neutral)${state.pair.note ? ` — ${state.pair.note}` : ''}; no romance between them.`
+        : `${ctx.romanceName || charName} and ${userName}: friendship ${state.pair.f}, romance ${state.pair.r} (both −100…100, 0 neutral)${state.pair.note ? ` — ${state.pair.note}` : ''}.`);
     // Свидание: намечено (понимание, что скоро; напомнить, только если {{char}} о нём забыл) или идёт (шаги {{char}} и общие)
-    lines.push(...dateStateLines(ctx));
+    if (!ctx.narratorMode || ctx.romanceName) lines.push(...dateStateLines(partnerCtx(ctx)));
 
     // Люди истории, которые сейчас рядом: кто кому кем приходится и как ладят (0 — вражда, 100 — близки)
     if (ctx.castSeen?.length) {
@@ -520,6 +526,7 @@ Text in ${lang}.`;
 
 /** Помощнику, вдогонку: на освободившиеся места не пришло новых шагов — только они */
 export function buildDateRefillMessages(ctx, src, k) {
+    ctx = partnerCtx(ctx);
     const { state, userName, charName } = ctx;
     const d = state.date;
     const open = openSteps(d).map(s => `- ${s.t}`).join('\n');
@@ -527,7 +534,7 @@ export function buildDateRefillMessages(ctx, src, k) {
     return [
         { role: 'system', content: `You suggest the next small steps of a date between ${charName} and ${userName} in an ongoing roleplay. Answer only with the requested lines.` },
         { role: 'user', content: [
-            src.card && `[${charName}]\n${src.card}`,
+            src.card && `[${ctx.narratorMode ? "Narrator / world card" : charName}]\n${src.card}`,
             `[Story — latest messages]\n${src.story || '—'}`,
             `The date: ${d.title}${d.where ? `, ${d.where}` : ''}; goal: ${d.goal || '—'}.\nStill open:\n${open || '—'}\nAlready done or tried:\n${done || '—'}`,
             `Write exactly ${k} line${k > 1 ? 's' : ''} like:\nNEW | <task for ${charName}> | <${charName}'s thought>\nEach leads toward the goal and grows out of the last thing done and what is happening right now. ${stepFlow(ctx, d)} Never chores or anything off the date. ${stepForm(ctx)}${(d.rejected || []).length ? ` Rejected as repeats — don't send again: ${d.rejected.slice(-4).join(' / ')}.` : ''} In ${langOf(ctx)}.`,
@@ -537,15 +544,16 @@ export function buildDateRefillMessages(ctx, src, k) {
 
 /** Отдельный запрос помощника о свидании: каждый ответ, коротко, только про свидание */
 export function buildDateSideMessages(ctx, src) {
+    ctx = partnerCtx(ctx);
     const { state, userName, charName } = ctx;
     const d = state.date;
     const task = [];
-    if (d && (d.status === 'active' || d.status === 'scheduled')) task.push(dateUpRule(ctx));
-    if (state.dateRecapFor && !(d?.status === 'active')) task.push(dateRecapRule(ctx));
+    if (d && (d.status === 'active' || d.status === 'scheduled')) task.push(dateUpRule(partnerCtx(ctx)));
+    if (state.dateRecapFor && !(d?.status === 'active')) task.push(dateRecapRule(partnerCtx(ctx)));
     return [
         { role: 'system', content: `You track a date between ${charName} and ${userName} in an ongoing roleplay for an extension. Answer only with the requested hidden block, nothing else. Count what the story actually shows — fairly, not stingily: a step done in spirit is done.` },
         { role: 'user', content: [
-            src.card && `[${charName}]\n${src.card}`,
+            src.card && `[${ctx.narratorMode ? "Narrator / world card" : charName}]\n${src.card}`,
             src.persona && `[${userName}]\n${src.persona}`,
             src.lore && `[World info]\n${src.lore}`,
             `[Story — latest messages; [NEW] marks those since the last check, given in full]\n${src.story || '—'}`,
@@ -597,10 +605,11 @@ ${dateFields(ctx)}${past.length ? ` Different from: ${past.join(' / ')}.` : ''}$
 
 /** Помощнику, второй проход: сверить план с записями лорбука о выбранном месте */
 export function buildDateReview(ctx, planBlock, lore, src) {
+    ctx = partnerCtx(ctx);
     const { userName, charName } = ctx;
     return [
         { role: 'system', content: `You check a planned date in a roleplay between ${charName} and ${userName} against the world's lore. Answer with a single line.` },
-        { role: 'user', content: `[World info about the planned date]\n${lore}\n\n[${charName}]\n${src.card || '—'}\n\n[${userName}]\n${src.persona || '—'}\n\n[Story — latest messages]\n${String(src.story || '').slice(-2500)}\n\n[The plan]\n${planBlock}\n\n${dateSense(ctx)}\nIf the plan clashes with the world info or the story (a dangerous or forbidden place, a wrong hour, it doesn't suit someone's state), answer with a corrected ${DATE_FORMAT} — same format, in ${langOf(ctx)}. Otherwise answer OK.` },
+        { role: 'user', content: `[World info about the planned date]\n${lore}\n\n[${ctx.narratorMode ? 'Narrator / world card' : charName}]\n${src.card || '—'}\n\n[${userName}]\n${src.persona || '—'}\n\n[Story — latest messages]\n${String(src.story || '').slice(-2500)}\n\n[The plan]\n${planBlock}\n\n${dateSense(ctx)}\nIf the plan clashes with the world info or the story (a dangerous or forbidden place, a wrong hour, it doesn't suit someone's state), answer with a corrected ${DATE_FORMAT} — same format, in ${langOf(ctx)}. Otherwise answer OK.` },
     ];
 }
 
@@ -618,7 +627,7 @@ function dateOfferRule(ctx) {
     const p = state.pair || {};
     const past = (state.datesDone || []).slice(-3).map(d => d.title);
     const cg = charGiftOf(state, ctx.phase?.h?.id);
-    const gift = cg && !cg.done && cg.got && cg.text ? ` ${charName}'s gift is ready (${cg.text}) — it may be part of it.` : '';
+    const gift = !ctx.narratorMode && cg && !cg.done && cg.got && cg.text ? ` ${charName}'s gift is ready (${cg.text}) — it may be part of it.` : '';
     return `${state.dateRollTry ? 'REQUIRED — your last reply skipped it. ' : ''}This reply ${charName} asks ${userName} on ${(p.r ?? 0) < 0 ? OUTING : (p.r ?? 0) === 0 ? `a date or ${OUTING} — whichever fits them` : 'a date'}, in ${charName}'s own way, as fits who ${charName} is and how they stand (friendship ${p.f ?? 0}, romance ${p.r ?? 0}${p.note ? `, ${p.note}` : ''}): openly, shyly, in passing or as a half-joke; after a quarrel — as a way to make up. ${dateSense(ctx)}
 Write only the asking; ${userName} answers. Only if ${charName} actually said it to ${userName} in this reply (not just thought of it), add after the HT line: ${DATE_FORMAT} — ${dateFields(ctx)}${gift} In ${langOf(ctx)}.${past.length ? ` Different from: ${past.join(' / ')}.` : ''} If the scene is urgent or dangerous, don't ask yet and add nothing.`;
 }
@@ -749,7 +758,7 @@ All text values in these comments: ${lang} only.`];
     // выпал шанс — ивент или приглашение на свидание начинаются прямо в этом ответе, игрок решает кнопками
     if (state.evRoll && ctx.evTarget) out.push(eventOfferRule(ctx));
     if (state.invRoll) out.push(inviteAskRule(ctx));
-    if (state.dateRoll && !dt) out.push(state.datePlan ? dateAskRule(ctx) : dateOfferRule(ctx));
+    if (state.dateRoll && (!ctx.narratorMode || ctx.romanceName) && !dt) out.push(state.datePlan ? dateAskRule(partnerCtx(ctx)) : dateOfferRule(partnerCtx(ctx)));
     const evOpen = ctx.evTarget ? openEvent(state, ctx.evTarget.hid) : null;
     if (evOpen?.status === 'invited') out.push(`Add ev=joined to the HT line if ${userName} accepts the invitation, ev=declined if not.`);
     else if (evOpen) out.push(`When "${evOpen.title}" ends, add ev=done | ev_note=its outcome in one sentence to the HT line${evOpen.kind === 'party' ? '' : `; ev=skipped if ${userName} turned away`}.`);
@@ -766,7 +775,10 @@ export function buildSideMessages(ctx, needs, src) {
     const h = phase.h;
     const lang = langOf(ctx);
     const sys = [`You are Hearthtide, the keeper of the holiday calendar for an ongoing roleplay between ${userName} and ${charName}. You do not continue the story. You read it and reply ONLY with the hidden blocks asked for below — no other text. Notes about what happened hold only what the story has shown. Never decide ${userName}'s thoughts, feelings, words or choices.`];
-    if (src.card) sys.push(`[${charName}]\n${src.card}`);
+    if (ctx.narratorMode) sys.push(ctx.romanceName
+        ? `Romance and date tracking refers to ${ctx.romanceName} and ${userName} only. ${charName} is the narrator/world card; it is not either half of the pair. Judge their bond by ${ctx.romanceName}'s established actions in the story; do not attribute the narrator's traits or the narrator's speech to that person.`
+        : `There is no selected romantic target. ${charName} is a narrator/world card, never assume it is in a romantic relationship with ${userName}.`);
+    if (src.card) sys.push(`[${ctx.narratorMode ? 'Narrator / world card' : charName}]\n${src.card}`);
     if (src.persona) sys.push(`[${userName}]\n${src.persona}`);
     if (src.lore) sys.push(`[World info]\n${src.lore}`);
     // заметки без указаний основной модели — помощнику нужны только факты
@@ -808,9 +820,10 @@ export function buildSideMessages(ctx, needs, src) {
     }
     if (needs.has('mean') && ctx.meaningFor) sf.push(`mean=what "${ctx.meaningFor}" is and how it is kept in this era and place, one sentence`);
     const pr = state.pair;
-    if (needs.has('bond') && pr) sf.push(`bond=FRIENDSHIP/ROMANCE only if the latest messages clearly changed how ${charName} and ${userName} stand (now ${pr.f}/${pr.r}${pr.note ? `, ${pr.note}` : ''}; both −100…100); bond_note=a few words on how they are now; leave both out if nothing changed`);
+    const partner = ctx.romanceName || charName;
+    if (needs.has('bond') && pr && (!ctx.narratorMode || ctx.romanceName)) sf.push(`bond=FRIENDSHIP/ROMANCE only if the latest messages clearly changed how ${partner} and ${userName} stand (now ${pr.f}/${pr.r}${pr.note ? `, ${pr.note}` : ''}; both −100…100); bond_note=a few words on how they are now; leave both out if nothing changed`);
     if (needs.has('ugift') && h) sf.push(`ugift=only if ${userName}'s own messages name, get or give ${userName}'s own gift for ${h.name} — what it is, as ${userName} wrote it; ugift_done=true once given; never a guess`);
-    if (needs.has('bond') && !pr) sf.push(`bond=FRIENDSHIP/ROMANCE: how ${charName} and ${userName} stand by the card, persona and story, two numbers −100…100 — friendship (enmity … 0 neutral … very close), romance (hatred or exes … 0 none … deep love); spouses, lovers, rivals and strangers all differ; bond_note=a few words on how they are now; bond_kin=yes only if they are family to each other by blood or upbringing (then romance 0)`);
+    if (needs.has('bond') && !pr && (!ctx.narratorMode || ctx.romanceName)) sf.push(`bond=FRIENDSHIP/ROMANCE: how ${partner} and ${userName} stand by the ${ctx.narratorMode ? 'selected NPC identity and their actual interactions in the story' : 'card, persona and story'}, two numbers −100…100 — friendship (enmity … 0 neutral … very close), romance (hatred or exes … 0 none … deep love); spouses, lovers, rivals and strangers all differ; bond_note=a few words on how they are now; bond_kin=yes only if they are family to each other by blood or upbringing (then romance 0)`);
     const keys = (x) => (x.startsWith('bond=') ? 'bond=F/R | bond_note=… | bond_kin=…' : x.startsWith('went=') ? 'went=… | went_note=…' : `${x.split('=')[0]}=…`);
     if (sf.length) task.push(`<!-- HT-S ${sf.map(keys).join(' | ')} -->\n${sf.map(x => `- ${x}`).join('\n')}`);
 
@@ -819,11 +832,11 @@ export function buildSideMessages(ctx, needs, src) {
         task.push(`<!-- HT-EV kind=moment | title=… -->
 Only if the latest messages show something new at "${ev?.title || 'the gathering'}" that ${userName} joined — a few words. Leave it out otherwise.${ev?.moments?.length ? ` Already: ${ev.moments.slice(-3).map(m => m.title).join(' / ')}.` : ''}`);
     }
-    if (needs.has('date') && state.date) task.push(dateUpRule(ctx));
-    if (needs.has('dateplan')) task.push(datePlanRule(ctx));
-    if (needs.has('daterecap') && !(needs.has('date') && state.date?.status === 'active')) task.push(dateRecapRule(ctx));
+    if (needs.has('date') && state.date) task.push(dateUpRule(partnerCtx(ctx)));
+    if (needs.has('dateplan')) task.push(datePlanRule(partnerCtx(ctx)));
+    if (needs.has('daterecap') && !(needs.has('date') && state.date?.status === 'active')) task.push(dateRecapRule(partnerCtx(ctx)));
     if (needs.has('datewatch')) task.push(`<!-- HT-DATE title=… | goal=… | where=… | at=YYYY-MM-DD HH:MM | kind=… | started=… | agreed=… -->
-${GOAL_RULE(ctx)}. Only if the latest messages show a date or an outing of ${userName} and ${charName} alone that isn't tracked yet: one of them asks the other for one (at — when; now if right away), or they are already on it together (started=yes). agreed=yes only if ${userName}'s own message already said yes to it or ${userName} proposed it; if ${charName} asked and ${userName} hasn't answered yet — agreed=no and no started.${kindField(ctx)} Leave it out otherwise.`);
+${GOAL_RULE(partnerCtx(ctx))}. Only if the latest messages show a date or an outing of ${userName} and ${partner} alone that isn't tracked yet: one of them asks the other for one (at — when; now if right away), or they are already on it together (started=yes). agreed=yes only if ${userName}'s own message already said yes to it or ${userName} proposed it; if ${partner} asked and ${userName} hasn't answered yet — agreed=no and no started.${kindField(ctx)} Leave it out otherwise.`);
     if (needs.has('new')) {
         // и то, на что уже позвали или позовут (дополнительные праздники, принятые приглашения): иначе каждое «приходи на…»
         // в истории становилось ещё одним поводом
