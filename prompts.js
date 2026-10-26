@@ -30,10 +30,10 @@ function npcAbout(ctx, h) {
 function npcExpect(ctx, h) {
     const { state, userName, charName } = ctx;
     const c = npcOf(state, h);
-    if (c?.group === 'kin_both') return `it is family to both — ${charName} and ${userName} are among those who keep the day, not guests`;
-    return `${userName} accepted the invitation: ${charName} and ${userName} are expected`;
+    if (c?.group === 'kin_both' && (!ctx.narratorMode || ctx.romanceName)) return `it is family to both — ${charName} and ${userName} are among those who keep the day, not guests`;
+    return `${userName} accepted the invitation${ctx.narratorMode && !ctx.romanceName ? '' : `: ${charName} and ${userName} are expected`}`;
 }
-const whomOf = (ctx, w) => (w === 'user' ? ctx.userName : w === 'char' ? ctx.charName : `${ctx.charName} and ${ctx.userName}`);
+const whomOf = (ctx, w) => (ctx.narratorMode && !ctx.romanceName ? ctx.userName : w === 'user' ? ctx.userName : w === 'char' ? ctx.charName : `${ctx.charName} and ${ctx.userName}`);
 
 /** Приглашения в промпт: ждёт ответа · принятые впереди · отказ · не пришли (обида) · таймскип перепрыгнул */
 function inviteLines(ctx) {
@@ -261,8 +261,8 @@ export function buildStatePrompt(ctx) {
     const evNo = ctx.evTarget ? (state.evts || []).find(e => e.hid === ctx.evTarget.hid && e.status === 'declined' && e.lastUpdate >= state.turn) : null;
     if (evNo) lines.push(`${userName} let "${evNo.title}" pass — it goes on without ${userName} or fades; don't push it.`);
     if (ctx.narratorMode) lines.push(ctx.romanceName
-        ? `Romance tracking is exclusively for ${ctx.romanceName} and ${userName}. ${charName} is the narrator/world card, not a participant in that pair. Other characters remain independent NPCs; do not substitute the narrator for ${ctx.romanceName}.`
-        : `No romantic partner has been chosen for ${userName}. ${charName} is a narrator/world card, not a romantic participant. Do not assign romance, friendship scores, dates or romantic advances to that card. Characters in the story remain NPCs until the player selects one in Hearthtide.`);
+        ? `Romance tracking is exclusively for ${ctx.romanceName} and ${userName}. ${ctx.narratorName || charName} is the narrator/world card, not a participant in that pair. Other characters remain independent NPCs; do not substitute the narrator for ${ctx.romanceName}.`
+        : `No romantic partner has been chosen for ${userName}. ${ctx.narratorName || charName} is a narrator/world card, not a romantic participant. Do not assign romance, friendship scores, dates or romantic advances to that card. Characters in the story remain NPCs until the player selects one in Hearthtide.`);
     if (state.dateDeclined?.turn >= state.turn) lines.push(`${userName} said no to the date (${state.dateDeclined.title}) — ${ctx.romanceName || charName} takes it in their own way.`);
 
     // {{char}} и {{user}}: как они сейчас
@@ -274,13 +274,14 @@ export function buildStatePrompt(ctx) {
 
     // Люди истории, которые сейчас рядом: кто кому кем приходится и как ладят (0 — вражда, 100 — близки)
     if (ctx.castSeen?.length) {
+        // Для рассказчика вторая сторона — только выбранный NPC, никогда сама карточка мира.
         // коротко: кем приходится и как ладят словами (числа модели не нужны — по ним она не пишет)
         const REL = { enmity: 'enmity', conflict: 'in conflict', cool: 'cool', neutral: 'even', warm: 'warm', close: 'close' };
         const how = (c, k) => c.note?.[k] || REL[relLevel(c.rel?.[k] ?? 0)];
         lines.push(`Who is who (it shows in how they speak and act): ${ctx.castSeen.map(c => {
             const ties = [c.toU && `${userName}'s ${c.toU}`, c.toC && `${charName}'s ${c.toC}`].filter(Boolean).join(', ');
             const rom = [c.rom?.user && `romance with ${userName}: ${c.rom.user}`, c.rom?.char && `romance with ${charName}: ${c.rom.char}`].filter(Boolean).join('; ');
-            return `${c.name || c.toU || c.toC}${ties ? ` (${ties})` : ''} — with ${userName}: ${how(c, 'user')}; with ${charName}: ${how(c, 'char')}${rom ? `; ${rom}` : ''}`;
+            return `${c.name || c.toU || c.toC}${ties ? ` (${ties})` : ''} — with ${userName}: ${how(c, 'user')}${!ctx.narratorMode || ctx.romanceName ? `; with ${charName}: ${how(c, 'char')}` : ''}${rom ? `; ${rom}` : ''}`;
         }).join(' · ')}.`);
     }
     // Приглашения: на дни рождения людей истории и дополнительные праздники
@@ -361,7 +362,7 @@ function peopleRules(ctx) {
     const who = h?.npc
         ? `up to 5 people at ${h.name}'s birthday (not ${charName}, not ${userName}) — ${h.name} first, it is their day, then their household and guests.`
         : `up to 8 people taking part in this holiday (not ${charName}, not ${userName}), kin first.`;
-    return `HT-PEOPLE replaces the previous list. P lines: ${who} ONLY people who have actually appeared in the story messages above — never someone the story hasn't shown yet. Each person once, under the name the story uses for them (never the same person twice under a name and a role). GROUP: relative = kin of ${userName} or of ${charName}, by blood or marriage (parents, siblings, in-laws); friend; acquaintance — judge by the card, persona and story. WANT: what this person wants or plans FOR THE HOLIDAY ITSELF — a gift they mean to give, a dish, a rite, someone they wait for, a wish for the day — as a plan or wish, a few words, the way people speak in this era and setting; never what they are doing right now, never their mood, quarrels or matters that have nothing to do with the holiday; it must not contradict what the story has shown of them. Each person different. GIFT: their gift while still pending, else empty. No surprise meant for ${userName} spoiled, no one who has left. D lines: people whose part is done (gave their gift, did their bit) — what they did; they leave the P list. Skip the block if nobody qualifies.`;
+    return `HT-PEOPLE replaces the previous list. P lines: ${who} ONLY people who have actually appeared in the story messages above — never someone the story hasn't shown yet. Each person once, under the name the story uses for them (never the same person twice under a name and a role). GROUP: relative = kin of ${userName}${!ctx.narratorMode || ctx.romanceName ? ` or of ${charName}` : ''}, by blood or marriage (parents, siblings, in-laws); friend; acquaintance — judge by the card, persona and story. WANT: what this person wants or plans FOR THE HOLIDAY ITSELF — a gift they mean to give, a dish, a rite, someone they wait for, a wish for the day — as a plan or wish, a few words, the way people speak in this era and setting; never what they are doing right now, never their mood, quarrels or matters that have nothing to do with the holiday; it must not contradict what the story has shown of them. Each person different. GIFT: their gift while still pending, else empty. No surprise meant for ${userName} spoiled, no one who has left. D lines: people whose part is done (gave their gift, did their bit) — what they did; they leave the P list. Skip the block if nobody qualifies.`;
 }
 const PEOPLE_BLOCK = '<!-- HT-PEOPLE\nP | NAME | GROUP | WANT | GIFT\nD | NAME | WHAT_THEY_DID\n-->';
 
@@ -369,20 +370,23 @@ const PEOPLE_BLOCK = '<!-- HT-PEOPLE\nP | NAME | GROUP | WANT | GIFT\nD | NAME |
 
 // Люди истории: каждого — один раз; потом только изменения отношений
 function castRule(ctx) {
-    const { state, userName, charName } = ctx;
+    const { state, userName } = ctx;
+    const charName = ctx.narratorMode ? ctx.romanceName : ctx.charName;
+    const hasPartner = !!charName;
     const known = (state.cast || []).map(c => c.name || `? (${[c.toU, c.toC].filter(Boolean).join(' / ')})`);
     const no = state.castNo || [];
     const hint = (ctx.castHint || []).map(x => `${x.name} (${x.n})`);
     const bare = (state.cast || []).filter(c => c.name && !c.toU && !c.toC && !c.edited).map(c => c.name);
+    const unchecked = hasPartner && ctx.narratorMode ? (state.cast || []).filter(c => c.name && !c.edited && !c.toC && c.name !== charName).slice(0, 6).map(c => c.name) : [];
     return `<!-- HT-CAST
 C | <name or ?> | <group> | <to user> | <to char> | <birthday> | <with user> | <with char> | <how with user> | <how with char>
 R | <name> | <with user> | <with char> | <how with user> | <how with char>
 -->
 Fill in the fields; never copy the <…> placeholders or field names into them.
-C: people of the story not in the list yet (not ${userName}, not ${charName}), once each. NAME: the person's own name only — never a role as a name; if the story hasn't named them yet, write ? — but add such an unnamed person only if they are close kin or have actually appeared in the story. GROUP: kin_user (${userName}'s own blood family) | kin_char (${charName}'s own blood family) | kin_both (family to both: their shared children or grandchildren, or a child of one whom the other raises or treats as their own — TO_USER and TO_CHAR then say who they are to each) | friend | acquaintance | other. TO_USER / TO_CHAR: who they are to ${userName} and to ${charName}, a word or two each, in ${langOf(ctx)}; leave it empty if there is no tie — never "nobody". Work out kinship from the card, persona, lore and story — never guess what they don't support. BIRTHDAY: DD.MM or DD.MM.YYYY only if stated, else empty. WITH_USER / WITH_CHAR: how they get on, −100 (enmity) … 0 (neutral) … 100 (very close). HOW_USER / HOW_CHAR: how they are with each, 2–4 words of your own, specific to these two people — not a generic label, in ${langOf(ctx)}.
-R: only someone whose relations clearly changed in the latest messages — the new numbers and words.${ctx.census ? `
-Census: go through the card, persona, world info and the whole story above and list everyone who matters and isn't listed yet, up to 10 C lines — kin of both sides first, then those the story names most often.` : ''}
-${bare.length ? `Listed without roles yet: ${bare.join(', ')} — send C lines for them too, with what the story shows.\n` : ''}Leave the block out if there is nothing.${hint.length ? ` Often named in the story: ${hint.join(', ')} — add those who are people.` : ''}${known.length ? ` Already listed: ${known.join(', ')}.` : ''}${no.length ? ` Never add: ${no.join(', ')}.` : ''}`;
+C: people of the story not in the list yet (not ${userName}${hasPartner ? `, not ${charName}` : ''}${ctx.narratorMode ? `, not the narrator/world card ${ctx.narratorName}` : ''}), once each. NAME: the person's own name only — never a role as a name; if the story hasn't named them yet, write ? — but add such an unnamed person only if they are close kin or have actually appeared in the story. GROUP: kin_user (${userName}'s own family)${hasPartner ? ` | kin_char (${charName}'s own family) | kin_both (family to both: shared children or a child treated as their own by both)` : ''} | friend | acquaintance | other. TO_USER: how they relate to ${userName}, a word or two, in ${langOf(ctx)}.${hasPartner ? ` TO_CHAR: how they relate to ${charName}, a word or two; "char" is this selected person, NEVER the narrator card. kin_char requires an established family tie specifically to ${charName}. When kin_both, give both ties.` : ` TO_CHAR, WITH_CHAR and HOW_CHAR must stay empty: no second person has been selected. NEVER use the narrator card as a family member or as a participant in relationships.`} Leave relationship fields empty if there is no tie — never "nobody". Work out kinship from the card, persona, lore and story — never guess what they don't support. BIRTHDAY: DD.MM or DD.MM.YYYY only if stated, else empty. WITH_USER${hasPartner ? ' / WITH_CHAR' : ''}: how they get on, −100 (enmity) … 0 (neutral) … 100 (very close). HOW_USER${hasPartner ? ' / HOW_CHAR' : ''}: 2–4 specific words in ${langOf(ctx)}. Do not invent relationships or transplant any other person's family to ${charName || 'the unselected slot'}.
+R: only someone whose relations clearly changed in the latest messages — the new numbers and words.${hasPartner ? ` If someone already listed is established in the story or lore as family to ${charName} but that tie is missing in the list, send a C line under their EXISTING name to set kin_char or kin_both and TO_CHAR. Never duplicate the person, and never infer family just from friendship.` : ''}${ctx.census ? `
+Census: go through the card, persona, world info and the whole story above and list everyone who matters and isn't listed yet, up to 10 C lines — ${hasPartner ? 'kin of both sides' : 'kin of the player'} first, then those the story names most often.` : ''}
+${bare.length ? `Listed without roles yet: ${bare.join(', ')} — send C lines for them too, with what the story shows.\n` : ''}${unchecked.length ? ` Recheck possible connections to ${charName} for already listed: ${unchecked.join(', ')}. Use C lines only where evidence actually establishes a tie.` : ''}Leave the block out if there is nothing.${hint.length ? ` Often named in the story: ${hint.join(', ')} — add those who are people.` : ''}${known.length ? ` Already listed: ${known.join(', ')}.` : ''}${no.length ? ` Never add: ${no.join(', ')}.` : ''}`;
 }
 
 // ═══ Свидания ═══
@@ -648,16 +652,16 @@ function calRule(ctx) {
     // поводы из истории и праздники, поправленные игроком, — уже в календаре, повторять их не нужно
     const storyKnown = ahead.filter(x => x.story || x.edited).map(x => `${x.name} (${isoOf(x.start)})`).slice(0, 6);
     // дни рождения спрашиваем один раз: не указаны в карточке — значит, их нет, пока история не скажет
-    const needB = (!state.birthdays?.user || !state.birthdays?.char) && !state.bdayAsked;
+    const needB = (!state.birthdays?.user || (!ctx.narratorMode && !state.birthdays?.char)) && !state.bdayAsked;
     const gap = ctx.skipGap;
     const askMode = ctx.eraMode === 'auto';
     return `<!-- HT-CAL
 S | ERA_AND_YEAR | FAITH | PLACE${askMode ? ' | MODE' : ''}
 H | YYYY-MM-DD | DAYS | NAME | MEANING | TYPE | PREP | ICON
-${needB ? `B | user | MM-DD | PREP\nB | char | MM-DD | PREP\n` : ''}${gap ? `X | YYYY-MM-DD | NAME | TYPE\n` : ''}E | YYYY-MM-DD | DAYS | NAME | HOST | FOR | MEANING
+${needB ? `B | user | MM-DD | PREP\n${ctx.narratorMode ? '' : 'B | char | MM-DD | PREP\n'}` : ''}${gap ? `X | YYYY-MM-DD | NAME | TYPE\n` : ''}E | YYYY-MM-DD | DAYS | NAME | HOST | FOR | MEANING
 -->
 - S: the era by name and the year${ctx.eraMode === 'modern' ? '' : ', as people of that time would say it (our reckoning in brackets only if theirs differs)'} — not a bare date; FAITH — ${faithRule(ctx)}; PLACE — the kind of place and its proper name exactly as the story gives it (never invent a name the story doesn't use).${askMode ? ' MODE — present if the story is set in our real world today, otherwise past (history, fantasy, other worlds).' : ''}
-- H: ${state.rebuild ? 'pick the calendar afresh: ' : ''}the next 4 holidays the whole country or world of the story keeps — public, religious, folk or seasonal days everyone there knows — from the current date (one going on today counts and comes first), in date order, none skipped, decided briskly${known.length ? `, continuing after: ${known.join(', ')}` : ''}. Never a day made up from the story itself — its groups, jobs, gangs, households or plot — nor anything still to happen in it: those are not the calendar. Personal and family dates never go here either. ${holidayGuide(ctx)} Compute movable feasts properly for that year and calendar.${easterHint(ctx)}${storyKnown.length ? ` Already added from the story — don't repeat: ${storyKnown.join(', ')}.` : ''} DAYS = how many days it really lasts. TYPE: religious | folk | seasonal | state | supernatural | fast | memorial. PREP = days before it people start getting ready (0 for a minor day). ICON — one word from: ${ICON_WORDS.join(', ')}. Birthdays never go in H lines.${needB ? `\n- B: birthdays of ${userName} and ${charName} only if the card, persona or story states them; otherwise leave that line out — never guess.` : ''}${gap ? `\n- X: holidays the time skip jumped over, ${gap.from} to ${gap.to}, by the same rules.` : ''}${ctx.passed?.length ? `\n- Already passed this year, don't repeat: ${ctx.passed.join(', ')}.` : ''}${ctx.banned?.length ? `\n- NEVER include these (the player removed them): ${ctx.banned.join(', ')}.` : ''}
+- H: ${state.rebuild ? 'pick the calendar afresh: ' : ''}the next 4 holidays the whole country or world of the story keeps — public, religious, folk or seasonal days everyone there knows — from the current date (one going on today counts and comes first), in date order, none skipped, decided briskly${known.length ? `, continuing after: ${known.join(', ')}` : ''}. Never a day made up from the story itself — its groups, jobs, gangs, households or plot — nor anything still to happen in it: those are not the calendar. Personal and family dates never go here either. ${holidayGuide(ctx)} Compute movable feasts properly for that year and calendar.${easterHint(ctx)}${storyKnown.length ? ` Already added from the story — don't repeat: ${storyKnown.join(', ')}.` : ''} DAYS = how many days it really lasts. TYPE: religious | folk | seasonal | state | supernatural | fast | memorial. PREP = days before it people start getting ready (0 for a minor day). ICON — one word from: ${ICON_WORDS.join(', ')}. Birthdays never go in H lines.${needB ? `\n- B: birthdays of ${userName}${ctx.narratorMode ? '' : ` and ${charName}`} only if the persona or story states them; otherwise leave that line out — never guess. Birthdays of other people belong in HT-CAST.` : ''}${gap ? `\n- X: holidays the time skip jumped over, ${gap.from} to ${gap.to}, by the same rules.` : ''}${ctx.passed?.length ? `\n- Already passed this year, don't repeat: ${ctx.passed.join(', ')}.` : ''}${ctx.banned?.length ? `\n- NEVER include these (the player removed them): ${ctx.banned.join(', ')}.` : ''}
 - E: ${extrasText(ctx)}
 - All of it in ${lang}: translate holiday names even if the story's world speaks another language.`;
 }
@@ -666,7 +670,7 @@ ${needB ? `B | user | MM-DD | PREP\nB | char | MM-DD | PREP\n` : ''}${gap ? `X |
 function extrasText(ctx) {
     const { state, userName, charName } = ctx;
     const known = (state.extras || []).filter(x => state.today == null || x.start >= state.today).map(x => `${x.name} (${isoOf(x.start)})`);
-    return `up to 2 side gatherings in the next 60 days that come with the lives of ${userName} and ${charName} — something a host would invite them to: a gathering of their work, trade or guild, their regiment, crew, school or court, their community or neighbours, often tied to a coming holiday. Only what fits who they are, where they live and what they do, by the card, persona, lore and story, in this era and setting; none if their lives give no grounds. NAME: what the gathering is, never just a person's name; HOST: who holds it and invites; FOR: user, char or both — whom the invitation is for. Never birthdays, never a holiday already in the calendar.${known.length ? ` Already known: ${known.join(', ')}.` : ''}`;
+    return `up to 2 side gatherings in the next 60 days that come with the lives of ${userName}${ctx.narratorMode && !ctx.romanceName ? '' : ` and ${charName}`} — something a host would invite them to: a gathering of their work, trade or guild, their regiment, crew, school or court, their community or neighbours, often tied to a coming holiday. Only what fits who they are, where they live and what they do, by the card, persona, lore and story, in this era and setting; none if their lives give no grounds. NAME: what the gathering is, never just a person's name; HOST: who holds it and invites; FOR: user, char or both — whom the invitation is for. Never birthdays, never a holiday already in the calendar.${known.length ? ` Already known: ${known.join(', ')}.` : ''}`;
 }
 function extrasRule(ctx) {
     return `<!-- HT-EXTRA
@@ -776,8 +780,8 @@ export function buildSideMessages(ctx, needs, src) {
     const lang = langOf(ctx);
     const sys = [`You are Hearthtide, the keeper of the holiday calendar for an ongoing roleplay between ${userName} and ${charName}. You do not continue the story. You read it and reply ONLY with the hidden blocks asked for below — no other text. Notes about what happened hold only what the story has shown. Never decide ${userName}'s thoughts, feelings, words or choices.`];
     if (ctx.narratorMode) sys.push(ctx.romanceName
-        ? `Romance and date tracking refers to ${ctx.romanceName} and ${userName} only. ${charName} is the narrator/world card; it is not either half of the pair. Judge their bond by ${ctx.romanceName}'s established actions in the story; do not attribute the narrator's traits or the narrator's speech to that person.`
-        : `There is no selected romantic target. ${charName} is a narrator/world card, never assume it is in a romantic relationship with ${userName}.`);
+        ? `Romance and date tracking refers to ${ctx.romanceName} and ${userName} only. ${ctx.narratorName || charName} is the narrator/world card; it is not either half of the pair. Judge their bond by ${ctx.romanceName}'s established actions in the story; do not attribute the narrator's traits or the narrator's speech to that person.`
+        : `There is no selected romantic target. ${ctx.narratorName || charName} is a narrator/world card, never assume it is in a romantic relationship with ${userName}.`);
     if (src.card) sys.push(`[${ctx.narratorMode ? 'Narrator / world card' : charName}]\n${src.card}`);
     if (src.persona) sys.push(`[${userName}]\n${src.persona}`);
     if (src.lore) sys.push(`[World info]\n${src.lore}`);

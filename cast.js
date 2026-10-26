@@ -107,9 +107,9 @@ export function mergeCast(state, parsed, langOk, turn, log = null) {
                 if (!ex.toU && c.toU) ex.toU = c.toU;
                 if (!ex.toC && c.toC) ex.toC = c.toC;
                 if (!ex.bday && c.bday) ex.bday = c.bday;
-                if (c.group && (ex.group === 'other' || ex.group === 'relative')) ex.group = c.group;
-                // общий ребёнок, которого раньше записали в родню одной стороны
-                else if (c.group === 'kin_both' && (ex.group === 'kin_user' || ex.group === 'kin_char')) ex.group = 'kin_both';
+                if (c.group === 'kin_both' || (c.group === 'kin_user' && ex.group === 'kin_char') || (c.group === 'kin_char' && ex.group === 'kin_user')) ex.group = 'kin_both';
+                else if ((c.group === 'kin_user' || c.group === 'kin_char') && !isKin(ex.group)) ex.group = c.group;
+                else if (c.group && (ex.group === 'other' || ex.group === 'relative')) ex.group = c.group;
             }
             why(c, `уже есть (${ex.name || ex.toU || '?'})`);
             continue;

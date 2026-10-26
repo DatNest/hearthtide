@@ -137,7 +137,7 @@ export function allHolidays(state) {
     const off = state.cancelled || {};
     const list = (state.holidays || []).filter(h => !isBanned(state, h.name)).map(h => ({ ...h, id: holidayId(h) })).filter(h => !off[h.id]);
     if (state.today != null) {
-        for (const who of ['user', 'char']) {
+        for (const who of (state.narratorMode ? ['user'] : ['user', 'char'])) {
             const md = state.birthdays?.[who];
             if (!md || state.birthdayOff?.[who]) continue;
             // и прошедший вчера (для «после»), и ближайший

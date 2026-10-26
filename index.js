@@ -125,6 +125,7 @@ function defaultState() {
         narratorMode: true,    // рассказчик: основная карточка не является парой игрока
         romanceTargetId: null, // игрок выбирает персонажа из списка людей
         romanceSessions: {}, // данные отношений и свиданий отдельно по каждой цели
+        activeCastKey: null,  // родственники и отношения с NPC — для текущего участника, не для карточки мира
         activeRomanceKey: '__main__',
         pair: null,             // активная пара: { f, r, note }; null — ещё не определена
         pairDrop: -99,          // когда дружба заметно упала (ссора) — шанс свидания выше
@@ -255,13 +256,83 @@ function switchRomanceContext(st = state) {
     // Без назначенного человека не существует романтической пары.
     if (newKey === '__none__') { st.pair = null; st.date = null; st.dateRoll = false; st.datePlan = null; }
 }
+// Личные связи с людьми истории зависят от выбранного персонажа. Общий список людей,
+// их дни рождения и отношения с игроком остаются общими; родня, роль и отношение
+// ко второй стороне хранятся отдельно для каждой цели (и для обычной карточки).
+const castContextKey = (st = state) => !st?.narratorMode ? '__main__' : validRomanceTarget(st)?.id || '__none__';
+const charKin = (group) => group === 'kin_char' || group === 'kin_both';
+const userKin = (group) => group === 'kin_user' || group === 'kin_both';
+const socialCastGroup = (group) => ['friend', 'acquaintance', 'other'].includes(group) ? group : 'other';
+function saveCastSide(person, key) {
+    person.partnerLinks ||= {};
+    person.partnerLinks[key] = {
+        toC: person.toC || null, kinC: charKin(person.group),
+        relC: person.rel?.char ?? 0, noteC: person.note?.char || null,
+        romC: person.rom?.char || null, relLock: !!person.relLock,
+    };
+}
+function castGroupFromSides(person, side) {
+    return person.kinU && side?.kinC ? 'kin_both'
+        : person.kinU ? 'kin_user'
+        : side?.kinC ? 'kin_char' : person.socialGroup || 'other';
+}
+function switchCastContext(st = state) {
+    if (!st) return;
+    st.cast ||= [];
+    const next = castContextKey(st);
+    // Записи предшествующих версий относятся к исходной {{char}} — не выдаём
+    // родню карточки рассказчика за родственников выбранного NPC.
+    if (st.activeCastKey == null) {
+        for (const person of st.cast) {
+            person.kinU = userKin(person.group);
+            person.socialGroup = socialCastGroup(person.group);
+            saveCastSide(person, '__main__');
+        }
+        st.activeCastKey = '__main__';
+    }
+    if (st.activeCastKey === next) return;
+    for (const person of st.cast) {
+        if (person.kinU === undefined) person.kinU = userKin(person.group);
+        if (!person.socialGroup) person.socialGroup = socialCastGroup(person.group);
+        // Не перезаписываем сохранённые связи при простом переключении.
+        saveCastSide(person, st.activeCastKey);
+        const side = person.partnerLinks?.[next] || {};
+        person.toC = side.toC || null;
+        person.rel ||= { user: 0, char: 0 };
+        person.note ||= { user: null, char: null };
+        person.rom ||= { user: null, char: null };
+        person.rel.char = side.relC ?? 0;
+        person.note.char = side.noteC || null;
+        person.rom.char = side.romC || null;
+        person.relLock = !!side.relLock;
+        person.group = castGroupFromSides(person, side);
+    }
+    st.activeCastKey = next;
+}
+// Обновления от модели и ручные правки сначала сохраняют текущую сторону;
+// затем она же используется в промптах, приглашениях и сортировке вкладок.
+function recordCastContext(st = state) {
+    if (!st) return;
+    switchCastContext(st);
+    for (const person of st.cast || []) {
+        if (person.kinU === undefined) person.kinU = userKin(person.group);
+        if (!person.socialGroup) person.socialGroup = socialCastGroup(person.group);
+        if (userKin(person.group)) person.kinU = true;
+        if (!userKin(person.group) && !charKin(person.group)) person.socialGroup = socialCastGroup(person.group);
+        saveCastSide(person, st.activeCastKey);
+        person.group = castGroupFromSides(person, person.partnerLinks[st.activeCastKey]);
+    }
+}
+
 function setRomanceTarget(cid) {
     if (!state?.narratorMode) return;
     if (cid && !(state.cast || []).some(p => p.id === cid && p.name && !p.off)) return;
     state.romanceTargetId = cid || null;
     switchRomanceContext();
+    switchCastContext();
+    ui.castTab = 'all';
     // Выбор игрока сохраняется даже после свайпа на более ранний ответ.
-    applyToSnapshots(st => { st.romanceTargetId = cid || null; st.narratorMode = true; });
+    applyToSnapshots(st => { st.romanceTargetId = cid || null; st.narratorMode = true; switchCastContext(st); });
     cancelSide();
     saveState();
     injectPrompts();
@@ -271,7 +342,9 @@ function setNarratorMode(enabled) {
     if (!state) loadState();
     state.narratorMode = !!enabled;
     switchRomanceContext();
-    applyToSnapshots(st => { st.narratorMode = !!enabled; });
+    switchCastContext();
+    ui.castTab = 'all';
+    applyToSnapshots(st => { st.narratorMode = !!enabled; switchCastContext(st); });
     cancelSide();
     saveState();
     injectPrompts();
@@ -315,6 +388,8 @@ function loadState() {
     // люди из старых версий: роли, родня по сторонам, романтика — кнопками
     migrateCast(state, getUserName(), getCharName());
     switchRomanceContext();
+    switchCastContext();
+    for (const snap of state.snapshots || []) if (snap.data) switchCastContext(snap.data);
     // свидание из прошлой версии: шаги разом и шкала с 35 % → живые шаги
     migrateDate(state);
     // узнанное друг о друге — теперь общее для пары; из прошлой версии берём то, что было в последнем свидании
@@ -377,7 +452,8 @@ function ctxFor() {
     return {
         state, phase,
         tracked: trackedOccasions(state),
-        userName: getUserName(), charName: getCharName(),
+        userName: getUserName(), charName: state.narratorMode && validRomanceTarget() ? validRomanceTarget().name : getCharName(),
+        narratorName: getCharName(),
         narratorMode: !!state.narratorMode,
         romanceName: state.narratorMode ? validRomanceTarget()?.name || null : getCharName(),
         part: dayPart(state.clock),
@@ -435,6 +511,7 @@ function restoreSnapshot(snap) {
         for (const k of ROMANCE_FIELDS) state[k] = clone(liveRomance[k]);
         state.activeRomanceKey = liveKey;
     } else switchRomanceContext();
+    switchCastContext();
     // пару, выставленную игроком, снимок из времени до правки не отменяет (более поздние уже ведут её дальше)
     if (state.pairSet?.pair && snap.beforeMsg <= state.pairSet.at) state.pair = clone(state.pairSet.pair);
     // удалённые игроком праздники не возвращаются вместе со старым снимком
@@ -517,7 +594,7 @@ function seenInStory(name, text) {
 // Люди истории для промпта: кто сейчас рядом (имя в последних сообщениях) и у кого скоро день рождения
 function castForPrompt() {
     // «глазок» выключен — человек не попадает в промпт (но и не вносится заново)
-    const cast = (state.cast || []).filter(c => !c.off && !castBanned(state, c.name));
+    const cast = (state.cast || []).filter(c => !c.off && !castBanned(state, c.name) && !(state.narratorMode && validRomanceTarget()?.id === c.id));
     if (!cast.length) return { castSeen: [] };
     // только те, кто в последних 4 сообщениях, — не больше четырёх; люди праздника уже описаны своей строкой
     const text = recentStoryText(4);
@@ -894,8 +971,21 @@ function processReply(N) {
     }
     // ── Люди истории: новые — один раз, известные — только отношения ──
     const castLog = [];
-    for (const c of castIn) if (mergeCast(state, c, langOk, state.turn, castLog)) slip = true;
-    if (castIn.length) console.info(`[Hearthtide] люди истории: ${castLog.join('; ') || 'пустой блок'} · всего ${state.cast.length}`);
+    for (const c of castIn) {
+        // Без выбранного NPC модель не имеет права придумывать родню рассказчику.
+        if (state.narratorMode && !validRomanceTarget()) {
+            for (const a of c.add || []) {
+                a.group = a.group === 'kin_both' ? 'kin_user' : a.group === 'kin_char' ? 'other' : a.group;
+                a.toC = null; a.relC = 0; a.noteC = null;
+            }
+            for (const u of c.upd || []) { u.relC = null; u.noteC = null; }
+        }
+        if (mergeCast(state, c, langOk, state.turn, castLog)) slip = true;
+    }
+    if (castIn.length) {
+        recordCastContext();
+        console.info(`[Hearthtide] люди истории: ${castLog.join('; ') || 'пустой блок'} · всего ${state.cast.length}`);
+    }
     else if (sideAsked.includes('cast')) console.info('[Hearthtide] люди истории: помощник не прислал HT-CAST (если ответ обрезан — см. ответ выше)');
     if (sideAsked.includes('cast')) state.lastCastTurn = state.turn;
     if (sideAsked.includes('census')) state.lastCensusTurn = state.turn;
@@ -1342,7 +1432,7 @@ function giftToName(v) {
     let x = String(v || '').trim().replace(/^(?:для|ко?|to|for)\s+/i, '');
     x = x.replace(/(?<![\p{L}])(?:именинни(?:к|ку|ка|ком|це|ца|цу|цы)|виновни(?:к|ку|ка|це|ца|цу)(?:\s+торжества)?|юбиляр\S*|the\s+birthday\s+(?:boy|girl|person)|the\s+guest\s+of\s+honou?r|the\s+host(?:ess)?)(?![\p{L}])/giu, ' ').replace(/\s+/g, ' ').trim();
     if (!x) return null;
-    const known = [getUserName(), getCharName(), ...(state?.cast || []).map(c => c.name)].filter(Boolean);
+    const known = [getUserName(), romanceCharacterName(), ...(state?.cast || []).map(c => c.name)].filter(Boolean);
     const words = x.split(' ');
     for (const k of known) if (words.some(w => stemEq(w, String(k).split(/\s+/)[0]))) return k;
     if (words.length > 3) return null;
@@ -1354,9 +1444,9 @@ function giftToName(v) {
 function whoOf(v) {
     const w = String(v || '').trim(), l = w.toLowerCase().replace(/ё/g, 'е');
     if (!w) return { kind: 'none', name: null };
-    if (/^(both|оба|обе|вместе|together|они|they)$/.test(l) || (stemEq(l.split(/\s+/)[0], getCharName()) && l.split(/\s+/).some(x => stemEq(x, getUserName())))) return { kind: 'both', name: `${getCharName()} и ${getUserName()}` };
+    if ((!state.narratorMode || romanceCharacterName()) && (/^(both|оба|обе|вместе|together|они|they)$/.test(l) || (stemEq(l.split(/\s+/)[0], romanceCharacterName()) && l.split(/\s+/).some(x => stemEq(x, getUserName()))))) return { kind: 'both', name: `${romanceCharacterName()} и ${getUserName()}` };
     if (/^(user|юзер|игрок|\{\{user\}\})$/.test(l) || stemEq(l.split(/\s+/)[0], getUserName().split(/\s+/)[0])) return { kind: 'user', name: getUserName() };
-    if (/^(char|чар|\{\{char\}\})$/.test(l) || stemEq(l.split(/\s+/)[0], getCharName().split(/\s+/)[0])) return { kind: 'char', name: getCharName() };
+    if ((!state.narratorMode || romanceCharacterName()) && (/^(char|чар|\{\{char\}\})$/.test(l) || stemEq(l.split(/\s+/)[0], romanceCharacterName().split(/\s+/)[0]))) return { kind: 'char', name: romanceCharacterName() };
     return { kind: 'other', name: w.charAt(0).toUpperCase() + w.slice(1) };
 }
 /** Игрок убрал пункт из «Уже сделано» (не о том празднике, ошибка): больше не записываем — и после свайпа */
@@ -1485,7 +1575,7 @@ function updateFocus(said) {
         const hits = act.map(h => {
             // «день», «праздник», «неделя» есть у многих — по ним не различить
             // по именам людей не судим — они звучат в истории всё время
-            const names = [getUserName(), getCharName(), ...(state.cast || []).map(c => c.name)].filter(Boolean)
+            const names = [getUserName(), romanceCharacterName(), ...(state.cast || []).map(c => c.name)].filter(Boolean)
                 .flatMap(n => String(n).toLowerCase().replace(/ё/g, 'е').split(/\s+/)).map(w => w.slice(0, 5));
             const words = String(h.name || '').toLowerCase().replace(/ё/g, 'е').split(/[^\p{L}\d]+/u)
                 .filter(w => (w.length >= 4 || /^\d+$/.test(w)) && !/^(день|праздн|недел|international|holiday|week|great)/.test(w) && !names.includes(w.slice(0, 5)));
@@ -1571,7 +1661,7 @@ function taskForm(t, charName, userName = '') {
 }
 /** Ответ модели о свидании: имена вместо {{user}} / (user), язык, шаги — задачи {{char}} */
 function tidyDateUp(up) {
-    const u = getUserName(), c = getCharName();
+    const u = getUserName(), c = romanceCharacterName() || getCharName();
     const stem = (n) => String(n || '').toLowerCase().replace(/ё/g, 'е').slice(0, 4);
     const fix = (t) => (t ? String(t).replace(/\{\{user\}\}/gi, u).replace(/\{\{char\}\}/gi, c)
         .replace(/\s*\((?:user|char|both|юзер|чар|оба|вместе|игрок)\)\s*/gi, ' ').replace(/\s{2,}/g, ' ').trim() || null : null);
@@ -1758,8 +1848,8 @@ function applyWent(x, went, note) {
     if (!x) return;
     const c = x.kind === 'bday' ? (state.cast || []).find(p => p.id === x.cid) : (x.host ? findCast(state, x.host) : null);
     // позвал сам {{char}} — обида ложится на пару
-    const byChar = !c && x.host && samePerson(x.host, getCharName());
-    const bump = (du, dc) => { if (!c) return; c.rel = c.rel || { user: 0, char: 0 }; c.rel.user = clampRel((c.rel.user ?? 0) + du) ?? 0; c.rel.char = clampRel((c.rel.char ?? 0) + dc) ?? 0; };
+    const byChar = !c && x.host && !!romanceCharacterName() && samePerson(x.host, romanceCharacterName());
+    const bump = (du, dc) => { if (!c) return; c.rel = c.rel || { user: 0, char: 0 }; c.rel.user = clampRel((c.rel.user ?? 0) + du) ?? 0; if (!state.narratorMode || validRomanceTarget()) c.rel.char = clampRel((c.rel.char ?? 0) + dc) ?? 0; recordCastContext(); };
     const log = state.yearLog?.items?.find(i => i.id === x.id);
     if (went === true) {
         state.lived = { ...(state.lived || {}), [x.id]: true };
@@ -1799,7 +1889,7 @@ function invCardHtml() {
     const x = bd ? null : (state.extras || []).find(e => e.id === inv.xid);
     const fresh = freshFor(`inv:${inv.key}`);
     const days = state.today != null ? inv.day - state.today : null;
-    const ties = bd ? [c?.toU && `${L().toWhom(getUserName())}: ${c.toU}`, c?.toC && `${L().toWhom(getCharName())}: ${c.toC}`].filter(Boolean).join(' · ')
+    const ties = bd ? [c?.toU && `${L().toWhom(getUserName())}: ${c.toU}`, c?.toC && `${L().toWhom(romanceCharacterName())}: ${c.toC}`].filter(Boolean).join(' · ')
         : [inv.host && `${L().exHost}: ${inv.host}`, x?.meaning].filter(Boolean).join(' · ');
     const pic = bd ? avaHtml(avatars()[inv.cid], inv.name) : `<span class="ht-ava ht-ava-none ht-ava-icon"><i class="fa-solid fa-champagne-glasses"></i></span>`;
     return `<div class="ht-offer ht-bdinv${fresh ? ' ht-offer-new' : ''}">
@@ -2082,7 +2172,7 @@ function birthdayOwner(name) {
     const n = String(name).toLowerCase();
     const stem = (x) => String(x || '').toLowerCase().replace(/ё/g, 'е').slice(0, Math.max(3, String(x || '').length - 2));
     if (n.replace(/ё/g, 'е').includes(stem(getUserName()))) return 'user';
-    if (n.replace(/ё/g, 'е').includes(stem(getCharName()))) return 'char';
+    if (!state.narratorMode && n.replace(/ё/g, 'е').includes(stem(getCharName()))) return 'char';
     return null;
 }
 
@@ -2398,7 +2488,7 @@ function displayName(h) {
     if (!h) return '';
     if (h.npc) return L().birthday(h.name);
     if (h.extra) return occasionName(h.name, h.meaning, h.host);
-    if (h.birthday) return L().birthday(h.who === 'user' ? getUserName() : getCharName());
+    if (h.birthday) return L().birthday(h.who === 'user' ? getUserName() : romanceCharacterName() || getCharName());
     // повод из истории, названный именем человека, — по описанию
     return h.story ? occasionName(h.name, h.cause, h.meaning) : h.name;
 }
@@ -3358,12 +3448,15 @@ const inCastTab = (p, t) => t === 'all' || (t === 'others' ? !KIN_GROUPS.include
     : (t === 'kin_user' || t === 'kin_char') ? p.group === t || p.group === 'kin_both' : p.group === t);
 
 function castTabHtml(view, live) {
-    const list = view.cast || [];
-    const u = getUserName(), c = getCharName();
-    const uA = userAvatarUrl(), cA = charAvatarUrl();
-    const tab = CAST_TABS.includes(ui.castTab) ? ui.castTab : 'all';
+    const list = state.narratorMode
+        ? (state.cast || []).filter(p => !castBanned(state, p.name)).map(p => ({ ...clone(p), bdayIn: bdayIn(p, state.today) }))
+        : (view.cast || []);
+    const u = getUserName(), c = romanceCharacterName();
+    const uA = userAvatarUrl(), cA = romanceAvatarUrl();
+    const tabs = state.narratorMode && !validRomanceTarget() ? CAST_TABS.filter(t => t !== 'kin_char' && t !== 'kin_both') : CAST_TABS;
+    const tab = tabs.includes(ui.castTab) ? ui.castTab : 'all';
     const tabLabel = { all: L().castAll, kin_user: L().kinOf(u), kin_char: L().kinOf(c), kin_both: L().kinBoth, others: L().castOthers };
-    const subtabs = `<div class="ht-subtabs" role="tablist">${CAST_TABS.map(t => {
+    const subtabs = `<div class="ht-subtabs" role="tablist">${tabs.map(t => {
         const n = list.filter(p => inCastTab(p, t)).length;
         if (t === 'kin_both' && !n && tab !== t) return '';          // общей семьи нет — и подвкладки нет
         return `<button role="tab" class="${t === tab ? 'ht-on' : ''}" data-act="cast-tab" data-tab="${t}" aria-selected="${t === tab}">${esc(tabLabel[t])}${n ? `<em>${n}</em>` : ''}</button>`;
@@ -3415,10 +3508,10 @@ function castTabHtml(view, live) {
             <b class="ht-cc-name${p.name ? '' : ' ht-cc-noname'}"${p.name ? '' : ` title="${esc(L().nameUnknown)}"`}>${esc(name)}</b>
             ${roles.length ? `<span class="ht-cc-role">${roles.map(esc).join('<br>')}</span>` : ''}
             ${d != null && d <= 30 ? `<span class="ht-cc-bd"><i class="fa-solid fa-cake-candles"></i>${esc(L().bdayIn(d, daysWord))}</span>` : ''}
-            <div class="ht-cc-bars">${miniBar(uA, u, p.rel?.user ?? 0, p.note?.user)}${miniBar(cA, c, p.rel?.char ?? 0, p.note?.char)}</div>
+            <div class="ht-cc-bars">${miniBar(uA, u, p.rel?.user ?? 0, p.note?.user)}${c ? miniBar(cA, c, p.rel?.char ?? 0, p.note?.char) : ''}</div>
             <details class="ht-cc-status"><summary>${L().status}<i class="fa-solid fa-chevron-down"></i></summary>
                 <p><b>${esc(u)}:</b> ${esc(p.note?.user || L().rel[relLevel(p.rel?.user ?? 0)])}</p>
-                <p><b>${esc(c)}:</b> ${esc(p.note?.char || L().rel[relLevel(p.rel?.char ?? 0)])}</p>
+                ${c ? `<p><b>${esc(c)}:</b> ${esc(p.note?.char || L().rel[relLevel(p.rel?.char ?? 0)])}</p>` : ''}
             </details>
             ${live ? `<div class="ht-cc-tools">
                 ${narrator && p.name && !p.off ? `<button data-act="cast-target" data-cid="${esc(p.id)}" title="${esc(L().targetChoose)}" aria-label="${esc(L().targetChoose)}"><i class="fa-regular fa-heart"></i></button>` : ''}
@@ -3559,7 +3652,7 @@ function groupOf(f) {
 }
 
 function castFormHtml(p, photo) {
-    const u = getUserName(), c = getCharName();
+    const u = getUserName(), c = romanceCharacterName();
     const kinU = p.group === 'kin_user' || p.group === 'kin_both', kinC = p.group === 'kin_char' || p.group === 'kin_both';
     const other = ['friend', 'acquaintance', 'other'];
     const groups = other.map(g => `<option value="${g}" ${p.group === g ? 'selected' : ''}>${esc(L().castGroup(g, u, c))}</option>`).join('');
@@ -3573,24 +3666,24 @@ function castFormHtml(p, photo) {
         <label>${L().fPersonName}<input class="text_pole" data-ed="name" value="${esc(p.name || '')}"></label>
         <div class="ht-edit-two">
             <label>${esc(L().toWhom(getUserName()))}<input class="text_pole" data-ed="toU" value="${esc(p.toU || '')}"></label>
-            <label>${esc(L().toWhom(getCharName()))}<input class="text_pole" data-ed="toC" value="${esc(p.toC || '')}"></label>
+            ${c ? `<label>${esc(L().toWhom(c))}<input class="text_pole" data-ed="toC" value="${esc(p.toC || '')}"></label>` : ''}
         </div>
         <div class="ht-kin-pick"><span>${L().kinWhose}</span>
             <label><input type="checkbox" data-ed="kinU" ${kinU ? 'checked' : ''}>${esc(L().kinOf(u))}</label>
-            <label><input type="checkbox" data-ed="kinC" ${kinC ? 'checked' : ''}>${esc(L().kinOf(c))}</label>
+            ${c ? `<label><input type="checkbox" data-ed="kinC" ${kinC ? 'checked' : ''}>${esc(L().kinOf(c))}</label>` : ''}
         </div>
         <label class="ht-notkin"${kinU || kinC ? ' hidden' : ''}>${L().fGroup}<select class="text_pole" data-ed="group">${groups}</select></label>
         <label>${L().fBday}<input class="text_pole" data-ed="bday" value="${esc(bdayText(p.bday))}" inputmode="numeric" placeholder="${esc(L().unknown)}"></label>
         <div class="ht-edit-two">
             <label>${esc(getUserName())} −100…100<input class="text_pole" data-ed="relU" type="number" min="-100" max="100" value="${num(p.rel?.user)}"></label>
-            <label>${esc(getCharName())} −100…100<input class="text_pole" data-ed="relC" type="number" min="-100" max="100" value="${num(p.rel?.char)}"></label>
+            ${c ? `<label>${esc(c)} −100…100<input class="text_pole" data-ed="relC" type="number" min="-100" max="100" value="${num(p.rel?.char)}"></label>` : ''}
         </div>
         <div class="ht-edit-two">
             <label>${esc(L().howWith(getUserName()))}<input class="text_pole" data-ed="noteU" value="${esc(p.note?.user || '')}"></label>
-            <label>${esc(L().howWith(getCharName()))}<input class="text_pole" data-ed="noteC" value="${esc(p.note?.char || '')}"></label>
+            ${c ? `<label>${esc(L().howWith(c))}<input class="text_pole" data-ed="noteC" value="${esc(p.note?.char || '')}"></label>` : ''}
         </div>
         ${isKin(p.group) ? '' : `<div class="ht-rom-field"><span><i class="fa-solid fa-heart"></i> ${esc(getUserName())}</span>${romRow('user', p.rom?.user)}
-            <span><i class="fa-solid fa-heart"></i> ${esc(getCharName())}</span>${romRow('char', p.rom?.char)}</div>`}
+            ${c ? `<span><i class="fa-solid fa-heart"></i> ${esc(c)}</span>${romRow('char', p.rom?.char)}` : ''}</div>`}
         <div class="ht-edit-actions">
             <button class="ht-btn" data-act="edit-cancel">${L().cancel}</button>
             <button class="ht-btn ht-btn-main" data-act="cast-save" data-cid="${esc(p.id)}"><i class="fa-solid fa-check"></i>${L().save}</button>
@@ -3617,10 +3710,11 @@ function saveCast(cid, f) {
     const bdayRaw = String(f.bday || '').trim();
     const bday = bdayRaw ? parseBday(bdayRaw) : null;
     if (bdayRaw && !bday) { window.toastr?.warning?.(L().badBday, 'Hearthtide'); return false; }
-    const relU = clampRel(f.relU), relC = clampRel(f.relC);
+    const relU = clampRel(f.relU), relC = state.narratorMode && !validRomanceTarget() ? (cur.rel?.char ?? 0) : clampRel(f.relC);
     const relChanged = relU !== (cur.rel?.user ?? 0) || relC !== (cur.rel?.char ?? 0)
         || String(f.noteU || '').trim() !== (cur.note?.user || '') || String(f.noteC || '').trim() !== (cur.note?.char || '');
     const group = CAST_GROUPS.includes(f.group) ? f.group : cur.group;
+    if (state.narratorMode && !validRomanceTarget() && charKin(group)) return false;
     const fix = {
         name, toU: String(f.toU || '').trim() || null, toC: String(f.toC || '').trim() || null, group, bday, edited: true,
         rom: isKin(group) ? { user: null, char: null } : { user: ROM_KEYS.includes(f.romU) ? f.romU : null, char: ROM_KEYS.includes(f.romC) ? f.romC : null },
@@ -3629,6 +3723,8 @@ function saveCast(cid, f) {
         const x = (st.cast || []).find(c => c.id === cid);
         if (!x) return;
         Object.assign(x, fix);
+        x.kinU = userKin(group);
+        if (!isKin(group)) x.socialGroup = socialCastGroup(group);
         if (relChanged) {
             x.rel = { user: relU ?? 0, char: relC ?? 0 };
             x.note = { user: String(f.noteU || '').trim() || null, char: String(f.noteC || '').trim() || null };
@@ -3636,7 +3732,8 @@ function saveCast(cid, f) {
         }
     };
     apply(state);
-    applyToSnapshots(apply);
+    recordCastContext(state);
+    applyToSnapshots(st => { apply(st); recordCastContext(st); });
     saveState();
     injectPrompts();
     window.toastr?.success?.(L().saved, 'Hearthtide');
@@ -3695,9 +3792,9 @@ function openPairEditor() {
 function openPairEditorRaw() {
     closeCastEditor();
     const pr = state.pair || { ...PAIR_DEFAULT };
-    const u = getUserName(), c = state.narratorMode ? validRomanceTarget()?.name : getCharName();
+    const u = getUserName(), c = romanceCharacterName();
     if (!c) return;
-    const mainAvatar = state.narratorMode ? avatars()[validRomanceTarget().id] : charAvatarUrl();
+    const mainAvatar = romanceAvatarUrl();
     const native = typeof HTMLDialogElement === 'function' && 'showModal' in HTMLDialogElement.prototype;
     const wrap = document.createElement(native ? 'dialog' : 'div');
     wrap.className = 'ht-modal';
@@ -3874,7 +3971,7 @@ function readyHtml(rd, live, max = 5) {
 
 /** Что о готовящемся празднике видно: приглашение, сделанное по истории, подарки */
 function trackBody(x, live, max) {
-    const gifts = [x.charGift?.text && `${getCharName()}: ${x.charGift.text}${x.charGift.done ? ` · ${L().giftGiven}` : ''}`,
+    const gifts = [x.charGift?.text && romanceCharacterName() && `${romanceCharacterName()}: ${x.charGift.text}${x.charGift.done ? ` · ${L().giftGiven}` : ''}`,
         x.userGift?.text && `${getUserName()}: ${x.userGift.text}${x.userGift.done ? ` · ${L().giftGiven}` : ''}`].filter(Boolean);
     return `${x.invited ? `<span class="ht-also-tag"><i class="fa-solid fa-envelope-open-text"></i>${esc(L().alsoInvited)}${x.host ? ` · ${esc(x.host)}` : ''}</span>` : ''}
         ${readyHtml(x.ready, live, max) || (x.daysTo <= 0 ? '' : `<p class="ht-mute">${esc(L().readyNone)}</p>`)}
@@ -3953,17 +4050,18 @@ function bodyHtml(view, live, tab = 'now') {
         `<em class="ht-chip"><i class="fa-solid ${holidayIcon(x)}"></i>${esc(x.name)}${x.days > 1 ? ` · ${esc(L().dayOf(x.dayIndex, x.days))}` : ''}${live && x.invited ? delBtn(x.id) : ''}</em>`).join('')}</div>` : '';
 
     // Чей день рождения: портрет (своё фото из «Людей»), кем приходится обоим, сколько исполняется
-    const bp = view.bdPerson;
+    const bp = state.narratorMode && view.bdPerson
+        ? { ...view.bdPerson, ...(() => { const c = (state.cast || []).find(p => p.id === view.bdPerson.cid); return c ? { toU: c.toU, toC: c.toC } : {}; })() } : view.bdPerson;
     const npcCard = bp ? `<div class="ht-npcbd">${avaHtml(avatars()[bp.cid], bp.name)}<div>
             <b>${esc(bp.name)}</b>${bp.age != null ? `<span class="ht-npcbd-age"><i class="fa-solid fa-cake-candles"></i>${esc(L().turns(bp.age, plural))}</span>` : ''}
-            ${[bp.toU && `${L().toWhom(getUserName())}: ${bp.toU}`, bp.toC && `${L().toWhom(getCharName())}: ${bp.toC}`].filter(Boolean).map(t => `<em>${esc(t)}</em>`).join('')}
+            ${[bp.toU && `${L().toWhom(getUserName())}: ${bp.toU}`, bp.toC && `${L().toWhom(romanceCharacterName())}: ${bp.toC}`].filter(Boolean).map(t => `<em>${esc(t)}</em>`).join('')}
         </div></div>` : '';
 
     // Подарки имениннику: общий от двоих — или от каждого свой; свой подарок {{user}} вписывает игрок
     let giftsCard = '';
     const ng = view.npcGifts;
     if (bp && ng) {
-        const u = getUserName(), c = getCharName();
+        const u = getUserName(), c = romanceCharacterName() || getUserName();
         const row = (who, g, extra = '', empty = L().giftUndecided) => `<div class="ht-gift-row${g?.done ? ' ht-done' : ''}"><i class="fa-solid ${g?.done ? 'fa-circle-check' : 'fa-gift'}"></i>
             <div><span>${esc(who)}</span><b class="${g?.text || g?.done ? '' : 'ht-mute-b'}">${esc(g?.done ? (g.text || L().giftGiven) : (g?.text || empty))}</b>${g?.text && !g.done ? giftStage(g) : ''}</div>${extra}</div>`;
         let body;
@@ -3986,7 +4084,7 @@ function bodyHtml(view, live, tab = 'now') {
 
     // Персонаж — всегда сверху, своя карточка: важность, текущий шаг, что было до, подарок
     let charCard = '';
-    if ((view.kind === 'prep' || view.kind === 'today') && view.care) {
+    if ((view.kind === 'prep' || view.kind === 'today') && view.care && (!state.narratorMode || romanceCharacterName())) {
         const g = view.charGift;
         const gift = view.gifts ? `<div class="ht-char-gift${g?.done ? ' ht-done' : ''}"><i class="fa-solid ${g?.done ? 'fa-circle-check' : 'fa-gift'}"></i>
             <div><span>${esc(L().giftForUser(view.giftTo || getUserName()))}</span><b>${esc(g?.done ? (g.text || L().giftGiven) : (g?.text || L().giftUndecided))}</b>${g?.text && !g.done ? giftStage(g) : ''}</div></div>` : '';
@@ -3995,7 +4093,7 @@ function bodyHtml(view, live, tab = 'now') {
             <div><span>${esc(L().giftFrom(getUserName()))}</span><b>${esc(ug.text)}</b>${ug.done ? '' : giftStage(ug)}</div></div>` : '';
         // прошлые шаги в инфоблок не выводим — они нужны только модели, чтобы цепочка шла дальше
         charCard = `<div class="ht-char${live && view.care === 'high' ? ' ht-glow' : ''}">
-            <div class="ht-char-head"><i class="fa-solid fa-user"></i><b>${esc(getCharName())}</b><span class="ht-care ht-care-${esc(view.care)}">${esc(L().care[view.care])}</span></div>
+            <div class="ht-char-head"><i class="fa-solid fa-user"></i><b>${esc(romanceCharacterName() || getCharName())}</b><span class="ht-care ht-care-${esc(view.care)}">${esc(L().care[view.care])}</span></div>
             ${view.care !== 'low' ? `<div class="ht-char-now"><span>${L().thinks}</span>${view.charNow ? `«${esc(view.charNow.replace(/^[«"“]+|[»"”]+$/g, ''))}»` : esc(L().charIdle)}</div>` : ''}
             ${gift}${ugift}
         </div>`;
