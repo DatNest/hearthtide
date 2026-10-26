@@ -1105,3 +1105,17 @@ dialog.ht-modal:not([open]) { display: none; }
 .ht-cc-target-empty > span { font-size: 10px; max-width: 120px; line-height: 1.4; opacity: .7; }
 .ht-cc-tools [data-act="cast-target"] { color: #e5aac7; }
 .ht-cc-tools [data-act="cast-target"]:hover { color: #ffcde3; }
+
+/* Настройка выбранного NPC прямо из главной карточки, не снимая выбор */
+.ht-ib .ht-cc-tools > .ht-cc-photo-action {
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: 3px 6px; border-radius: 6px; color: var(--ht-mute);
+    font-size: 0.78em; cursor: pointer; line-height: normal;
+}
+.ht-ib .ht-cc-tools > .ht-cc-photo-action:hover,
+.ht-ib .ht-cc-tools > .ht-cc-photo-action:focus-within {
+    color: var(--ht-fg); background: var(--ht-soft-2);
+}
+@media (max-width: 600px) {
+    .ht-ib .ht-cc-tools > .ht-cc-photo-action { padding: 1px 6px; font-size: 0.74em; }
+}

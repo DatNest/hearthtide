@@ -13,7 +13,7 @@ import { eventSource, event_types } from '../../../../scripts/events.js';
 import { dayPart, plural, parseDate, fromDayNum, isoOf, dayNum } from './dates.js';
 import { slimSmallTag, parseReady, parseExtras, parseSmall, parseCalendar, parsePrep, parseDay, parseRecap, parsePeople, parseEvents, parseOffers, parseBeat, parseCast, parseDateBlock, parseDateUp, parseRecapParts, stripBlocks } from './tag.js';
 import { PAIR_DEFAULT, bondCap, dateKindFor, isFriendlyDate, newDate, startDate, applyDateUp, openSteps, goalOpen, doneCount, toggleStep, finishDate, dateChanceInfo, migrateDate, DATE_MISS_HOURS, DATE_OPEN, DATE_SKIP_END, DATE_SKIP_HARD, DATE_CLOSE_TURNS, DATE_QUIET, goalNeed, paceAuto, stepKinds, MISS_PAIR } from './romance.js';
-import { CAST_GROUPS, KIN_GROUPS, ROM_KEYS, isKin, samePerson, findCast, castBanned, parseBday, bdayText, bdayIn, ageOf, relLevel, romLevel, clampRel, mergeCast, migrateCast, nameCandidates } from './cast.js';
+import { CAST_GROUPS, KIN_GROUPS, ROM_KEYS, isKin, samePerson, findCast, castBanned, parseBday, bdayText, bdayIn, ageOf, relLevel, romLevel, clampRel, mergeCast, migrateCast, registerCastIds, nameCandidates } from './cast.js';
 import { phaseOf, mentionEvery, holidayId, allHolidays, banKeys, isBanned, namesMatch, passedThisYear, sameOccasion, hasGifts, openEvent, offeredEvent, EVENT_CHANCE_DEFAULT, EVENT_COOLDOWN, OPEN_STATUSES, sideNeeds, sideDue, CENSUS_DEPTH, dateHoursLeft, npcBdKey, npcBdOn, npcHoliday, giftJoint, trackedOccasions, charGiftOf, activeOccasions, occTier, preparingNow } from './calendar.js';
 import { buildStatePrompt, buildTagPrompt, buildSideMessages, buildDateReview, buildDateSideMessages, buildDateRefillMessages, giftTarget, hName, isGathering } from './prompts.js';
 import { inviteCandidates, bdKey, extraKey, mergeExtras, INVITE_TRIES, INVITE_COOL, INVITE_AHEAD } from './invites.js';
@@ -125,6 +125,8 @@ function defaultState() {
         narratorMode: true,    // рассказчик: основная карточка не является парой игрока
         romanceTargetId: null, // игрок выбирает персонажа из списка людей
         romanceSessions: {}, // данные отношений и свиданий отдельно по каждой цели
+        castIds: {},        // постоянные идентификаторы людей, переживают повторный разбор сообщений
+        castPhotos: {},     // фотографии (не копируются в снимки при каждом ходе)
         activeCastKey: null,  // родственники и отношения с NPC — для текущего участника, не для карточки мира
         activeRomanceKey: '__main__',
         pair: null,             // активная пара: { f, r, note }; null — ещё не определена
@@ -242,7 +244,7 @@ function validRomanceTarget(st = state) {
     return person?.name && !person.off ? person : null;
 }
 function currentRomanceKey(st = state) {
-    return !st?.narratorMode ? '__main__' : validRomanceTarget(st)?.id || '__none__';
+    return !st?.narratorMode ? '__main__' : st.romanceTargetId || '__none__';
 }
 function switchRomanceContext(st = state) {
     if (!st) return;
@@ -385,8 +387,42 @@ function loadState() {
     // место, сохранённое вместе с английским словом-типом («settlement Деревня Березовка»)
     if (state.place) state.place = tidyPlace(state.place);
     if (state.setting?.place) state.setting.place = tidyPlace(state.setting.place);
+    // Ранние версии хранили JPEG отдельно в ht_avatars. Переносим в
+    // основное состояние чата, чтобы сохранение не зависело от второго ключа.
+    state.castPhotos ||= {};
+    if (chat_metadata.ht_avatars && typeof chat_metadata.ht_avatars === 'object') {
+        for (const [id, photo] of Object.entries(chat_metadata.ht_avatars)) {
+            if (typeof photo === 'string' && photo.startsWith('data:image/') && !state.castPhotos[id]) state.castPhotos[id] = photo;
+        }
+        delete chat_metadata.ht_avatars;
+    }
     // люди из старых версий: роли, родня по сторонам, романтика — кнопками
     migrateCast(state, getUserName(), getCharName());
+    registerCastIds(state);
+    // В повреждённых старой версией чатах ID мог уже смениться. Ищем тот же
+    // NPC в предыдущих снимках и возвращаем ему портрет / назначение / данные.
+    const oldPeople = (state.snapshots || []).flatMap(sn => sn.data?.cast || []);
+    const originalTarget = state.romanceTargetId;
+    for (const person of state.cast || []) {
+        const same = oldPeople.filter(old => old.id && (old.id === person.id ||
+            (person.name && old.name && samePerson(person.name, old.name)) ||
+            (!person.name && !old.name && person.toU === old.toU && person.toC === old.toC)));
+        if (!state.castPhotos[person.id]) {
+            const donor = same.find(old => state.castPhotos[old.id]);
+            if (donor) {
+                state.castPhotos[person.id] = state.castPhotos[donor.id];
+                delete state.castPhotos[donor.id]; // фото более не зависит от старого ID
+            }
+        }
+        if (originalTarget && originalTarget !== person.id && same.some(old => old.id === originalTarget)
+            && !(state.cast || []).some(other => other.id === originalTarget)) {
+            state.romanceTargetId = person.id;
+            if (state.romanceSessions?.[originalTarget] && !state.romanceSessions[person.id]) {
+                state.romanceSessions[person.id] = state.romanceSessions[originalTarget];
+            }
+            if (state.activeRomanceKey === originalTarget) state.activeRomanceKey = person.id;
+        }
+    }
     switchRomanceContext();
     switchCastContext();
     for (const snap of state.snapshots || []) if (snap.data) switchCastContext(snap.data);
@@ -490,12 +526,14 @@ function ctxFor() {
 // ─── Снимки: пересчёт при свайпе и правке, откат при удалении ───
 function takeSnapshot(beforeMsg) {
     state.snapshots = state.snapshots.filter(s => s.beforeMsg < beforeMsg);
-    const { snapshots, ...rest } = state;
+    // Фотографии и реестр постоянных ID — решения игрока, не снимки сюжета.
+    // Не клонируем JPEG на каждый ход и не откатываем их при повторном разборе.
+    const { snapshots, castPhotos, castIds, ...rest } = state;
     state.snapshots.push({ beforeMsg, data: clone(rest) });
     if (state.snapshots.length > 20) state.snapshots = state.snapshots.slice(-20);
 }
 // Решения игрока (удалённые праздники) переживают откаты
-const USER_FIELDS = ['readyNo', 'banned', 'bannedNames', 'birthdayOff', 'calIgnore', 'offerNo', 'offerSeen', 'evDecisions', 'castNo', 'dateDecisions', 'pairSet', 'narratorMode', 'romanceTargetId', 'romanceSessions', 'bdDecisions', 'userGift', 'giftMode', 'decMsg'];
+const USER_FIELDS = ['readyNo', 'banned', 'bannedNames', 'birthdayOff', 'calIgnore', 'offerNo', 'offerSeen', 'evDecisions', 'castNo', 'dateDecisions', 'pairSet', 'narratorMode', 'romanceTargetId', 'romanceSessions', 'castIds', 'castPhotos', 'bdDecisions', 'userGift', 'giftMode', 'decMsg'];
 
 function restoreSnapshot(snap) {
     // Если цель выбрали после создания снимка, её текущие данные не должны
@@ -503,14 +541,20 @@ function restoreSnapshot(snap) {
     const liveKey = state.activeRomanceKey;
     const liveRomance = Object.fromEntries(ROMANCE_FIELDS.map(k => [k, clone(state[k] ?? null)]));
     const keep = state.snapshots;
-    const user = Object.fromEntries(USER_FIELDS.map(k => [k, clone(state[k] ?? null)]));
+    // JPEG могут занимать много места: не сериализуем их заново при откате.
+    const user = Object.fromEntries(USER_FIELDS.map(k => [k, k === 'castPhotos' ? state[k] : clone(state[k] ?? null)]));
     Object.assign(state, clone(snap.data));
     for (const [k, v] of Object.entries(user)) if (v != null) state[k] = v;
     state.snapshots = keep;
-    if (liveKey === currentRomanceKey() && liveKey !== state.activeRomanceKey) {
-        for (const k of ROMANCE_FIELDS) state[k] = clone(liveRomance[k]);
-        state.activeRomanceKey = liveKey;
-    } else switchRomanceContext();
+    const wantedKey = currentRomanceKey();
+    if (wantedKey !== state.activeRomanceKey) {
+        // НЕЛЬЗЯ вызывать switchRomanceContext() здесь: он запишет старые
+        // отношения из снимка в актуальную сессию другого персонажа.
+        const entry = liveKey === wantedKey ? liveRomance : state.romanceSessions?.[wantedKey] || initialRomance();
+        const defaults = initialRomance();
+        for (const k of ROMANCE_FIELDS) state[k] = clone(entry[k] ?? defaults[k]);
+        state.activeRomanceKey = wantedKey;
+    }
     switchCastContext();
     // пару, выставленную игроком, снимок из времени до правки не отменяет (более поздние уже ведут её дальше)
     if (state.pairSet?.pair && snap.beforeMsg <= state.pairSet.at) state.pair = clone(state.pairSet.pair);
@@ -768,6 +812,7 @@ function processReply(N) {
     if (!state || !msg || msg.is_user || msg.is_system || !msg.mes) return;
     if (isOpening(N)) return;
 
+    registerCastIds(state); // сохраняем ID до отката, иначе портреты и выбранная цель потеряют привязку
     const snap = state.snapshots.find(s => s.beforeMsg === N);
     if (snap) restoreSnapshot(snap);
     takeSnapshot(N);
@@ -973,7 +1018,7 @@ function processReply(N) {
     const castLog = [];
     for (const c of castIn) {
         // Без выбранного NPC модель не имеет права придумывать родню рассказчику.
-        if (state.narratorMode && !validRomanceTarget()) {
+        if (state.narratorMode && !state.romanceTargetId) {
             for (const a of c.add || []) {
                 a.group = a.group === 'kin_both' ? 'kin_user' : a.group === 'kin_char' ? 'other' : a.group;
                 a.toC = null; a.relC = 0; a.noteC = null;
@@ -3408,7 +3453,7 @@ function userAvatarUrl() {
     if (f) return `/thumbnail?type=persona&file=${encodeURIComponent(f)}`;
     return document.querySelector?.('.mes[is_user="true"] .avatar img')?.getAttribute('src') || null;
 }
-const avatars = () => (chat_metadata.ht_avatars = chat_metadata.ht_avatars || {});
+const avatars = () => (state ? (state.castPhotos ||= {}) : (chat_metadata.ht_avatars ||= {}));
 async function shrinkImage(file, size = 112) {
     const url = URL.createObjectURL(file);
     try {
@@ -3488,7 +3533,7 @@ function castTabHtml(view, live) {
             <p>${esc(pr.unknown ? L().pairUnknown : pr.note || `${L().rel[relLevel(pr.f)]} · ${L().rom[rl]}`)}</p>
             ${dateLine ? `<p><b>${esc(L().dateWord)}:</b> ${esc(dateLine)}</p>` : ''}
         </details>
-        ${live ? `<div class="ht-cc-tools">${narrator ? `<button data-act="cast-target-clear" title="${esc(L().targetClear)}" aria-label="${esc(L().targetClear)}"><i class="fa-solid fa-xmark"></i></button>` : ''}<button data-act="pair-edit" title="${esc(L().pairEdit)}" aria-label="${esc(L().pairEdit)}"><i class="fa-solid fa-pen"></i></button></div>` : ''}
+        ${live ? `<div class="ht-cc-tools">${narrator && featured ? `<label class="ht-cc-photo-action" title="${esc(L().photo)}" aria-label="${esc(L().photo)}"><i class="fa-solid fa-image"></i><input type="file" accept="image/*" data-act="cast-photo" data-cid="${esc(featured.id)}" hidden></label><button data-act="cast-edit" data-cid="${esc(featured.id)}" title="${esc(L().edit)}" aria-label="${esc(L().edit)}"><i class="fa-solid fa-user-pen"></i></button><button data-act="cast-target-clear" title="${esc(L().targetClear)}" aria-label="${esc(L().targetClear)}"><i class="fa-solid fa-xmark"></i></button>` : ''}<button data-act="pair-edit" title="${esc(L().pairEdit)}" aria-label="${esc(L().pairEdit)}"><i class="fa-solid fa-pen"></i></button></div>` : ''}
     </div>` : '';
 
     const ava = avatars();
@@ -3600,7 +3645,7 @@ function openCastEditorRaw(cid) {
             t.parentElement.querySelectorAll('button').forEach(b => { b.classList.toggle('ht-on', b === t); b.setAttribute('aria-pressed', String(b === t)); });
         } else if (t.dataset.act === 'cast-photo-del') {
             delete avatars()[cid];
-            saveChatDebounced();
+            saveState();
             wrap.querySelector('.ht-cast-photo .ht-ava')?.replaceWith(Object.assign(document.createElement('span'), { className: 'ht-ava ht-ava-none', textContent: initials(p.name) }));
             t.remove();
             renderAll();
@@ -3624,7 +3669,7 @@ function openCastEditorRaw(cid) {
         if (!inp?.files?.[0]) return;
         try {
             avatars()[cid] = await shrinkImage(inp.files[0]);
-            saveChatDebounced();
+            saveState();
             const img = document.createElement('span');
             img.className = 'ht-ava';
             img.innerHTML = `<img src="${esc(avatars()[cid])}" alt="">`;
@@ -3733,6 +3778,7 @@ function saveCast(cid, f) {
     };
     apply(state);
     recordCastContext(state);
+    registerCastIds(state); // переименованная вручную карточка сохраняет старый ID
     applyToSnapshots(st => { apply(st); recordCastContext(st); });
     saveState();
     injectPrompts();
@@ -3763,7 +3809,6 @@ function removeCast(cid) {
     apply(state);
     applyToSnapshots(apply);
     delete avatars()[cid];
-    saveChatDebounced();
     saveState();
     injectPrompts();
     renderAll();
@@ -4186,8 +4231,8 @@ function bindBlock(block) {
         if (!inp?.files?.[0]) return;
         try {
             avatars()[inp.dataset.cid] = await shrinkImage(inp.files[0]);
-            saveChatDebounced();
-            renderBlock(Number(block.dataset.mesid));
+            saveState();
+            renderAll();
         } catch (err) {
             console.error('[Hearthtide] картинка:', err);
             window.toastr?.warning?.(L().badPhoto, 'Hearthtide');
@@ -4256,7 +4301,7 @@ function bindBlock(block) {
             t.parentElement.querySelectorAll('button').forEach(b => { b.classList.toggle('ht-on', b === t); b.setAttribute('aria-pressed', String(b === t)); });
         } else if (t.dataset.act === 'cast-photo-del') {
             delete avatars()[t.dataset.cid];
-            saveChatDebounced();
+            saveState();
             renderBlock(id);
         } else if (t.dataset.act === 'inv-yes' || t.dataset.act === 'inv-no') {
             decideInv(t.dataset.act === 'inv-yes');

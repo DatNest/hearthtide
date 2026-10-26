@@ -24,6 +24,46 @@ export function samePerson(a, b) {
 }
 
 export const findCast = (state, name) => (state.cast || []).find(c => samePerson(c.name, name)) || null;
+
+// Один и тот же NPC должен сохранять ID при повторном разборе ответа/свайпа.
+// Иначе пользовательские фотографии, выбор главной пары и её отдельный прогресс
+// оказываются привязаны к исчезнувшему ID. Реестр живёт вне снимков ответа.
+function identityKeys(person) {
+    const result = [];
+    const name = norm(person.name);
+    if (name) {
+        result.push(`name:${name}`);
+        const first = name.split(' ')[0];
+        if (first.length >= 3) result.push(`first:${first}`);
+    }
+    const a = norm(person.toU), b = norm(person.toC);
+    if (a || b) result.push(`roles:${a}|${b}`);
+    return result;
+}
+export function registerCastIds(state) {
+    state.castIds ||= {};
+    for (const person of state.cast || []) {
+        if (!person?.id) continue;
+        for (const key of identityKeys(person)) {
+            // Уже закреплённый ID не перезаписываем чужой карточкой.
+            if (!state.castIds[key]) state.castIds[key] = person.id;
+        }
+    }
+}
+function castIdFor(state, person, turn, index) {
+    registerCastIds(state);
+    const keys = identityKeys(person);
+    const occupied = new Set((state.cast || []).map(c => c.id));
+    let id = keys.map(k => state.castIds[k]).find(v => v && !occupied.has(v));
+    // Никакой случайности: один и тот же ответ всегда даёт один и тот же ID.
+    if (!id) id = `c-${turn}-${index}`;
+    let suffix = 0;
+    const stem = id;
+    while (occupied.has(id)) id = `${stem}-${++suffix}`;
+    for (const key of keys) if (!state.castIds[key]) state.castIds[key] = id;
+    return id;
+}
+
 // «Мать Алексея», «тёща», «старший брат» — это роль, а не имя
 // целое слово (иначе «Братислав» и «Sonya» становились ролями), кроме основ «старш-», «крёстн-», «grand-»
 const ROLE_WORD = /^(?:(?:мать|мама|матушка|отец|папа|батюшка|тятя|брат|сестра|сын|дочь|дочка|жена|муж|тёща|теща|тесть|свекровь|свёкор|свекор|золовка|деверь|шурин|сноха|невестка|зять|дед|дедушка|бабка|бабушка|дядя|тётя|тетя|кум|кума|mother|father|mom|dad|brother|sister|son|daughter|wife|husband|aunt|uncle)(?![\p{L}])|старш|младш|крёстн|крестн|grand)/iu;
@@ -92,6 +132,7 @@ export function mergeCast(state, parsed, langOk, turn, log = null) {
     if (!parsed) return false;
     let slip = false;
     state.cast = state.cast || [];
+    registerCastIds(state);
     const why = (c, w) => log?.push(`${c.name || c.toU || c.toC || '?'} — ${w}`);
     for (const c of parsed.add) {
         // имя бывает на любом языке; описания не на том языке — убираем, а человека всё равно вносим
@@ -116,7 +157,7 @@ export function mergeCast(state, parsed, langOk, turn, log = null) {
         }
         why(c, 'добавлен');
         state.cast.push({
-            id: `c-${turn}-${state.cast.length}-${Math.random().toString(36).slice(2, 6)}`,
+            id: castIdFor(state, c, turn, state.cast.length),
             name: c.name || null, group: c.group, toU: c.toU, toC: c.toC, bday: c.bday,
             rel: { user: c.relU ?? 0, char: c.relC ?? 0 }, note: { user: c.noteU || null, char: c.noteC || null },
             rom: { user: null, char: null }, scale: 2, turn,
